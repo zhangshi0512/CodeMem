@@ -120,7 +120,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           user_id: DEFAULT_USER_ID,
           group_ids: [DEFAULT_GROUP_ID],
           query: args.query,
-          memory_types: ['episodic_memory', 'event_log', 'profile'],
+          memory_types: ['episodic_memory', 'profile'],
           retrieve_method: 'hybrid',
           top_k: 5
         });
