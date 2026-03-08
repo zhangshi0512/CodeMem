@@ -1,30 +1,42 @@
-# CodeMem 🧠💻
+# CodeMem
 
-A "Long-Term Pair Programmer" built on the Model Context Protocol (MCP) and powered by EverMemOS.
+A **Long-Term Pair Programmer** built on the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) and powered by [EverMemOS](https://evermind.ai/).
 
-CodeMem acts as a universal, persistent memory backend for your favorite AI coding assistants (Cursor, Windsurf, Claude Code). It quietly observes and extracts **EventLog Memory** (architectural decisions, bug fixes) and **Profile Memory** (your preferred coding style) into a cloud-synced vault. 
+CodeMem acts as a universal, persistent memory backend for your AI coding assistants. It quietly extracts **architectural decisions**, **coding preferences**, and **project context** into a cloud-synced memory vault powered by EverMemOS.
 
-When you ask your AI IDE a question, it autonomously queries CodeMem to retrieve exact project-specific context that standard LLMs otherwise forget between sessions.
-
-Because it lives in the cloud, **CodeMem creates a "Shared Brain" effect**. Tell Claude Code a preference in your terminal, and Cursor will automatically know about it five minutes later.
+When your AI IDE writes code, it autonomously queries CodeMem to retrieve project-specific context that standard LLMs forget between sessions. Because the memory lives in the cloud, **all your AI tools share the same brain** — save a preference in Claude Code, and Cursor knows about it instantly.
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
-* **Universal Compatibility:** Works with any IDE or CLI that supports the open Model Context Protocol (MCP).
-* **Conversational Saving:** You don't need to click buttons. Just tell your AI: *"Save the decision that we are using Tailwind for this project."*
-* **Autonomous Retrieval:** The AI automatically searches your memory bank when it lacks context before writing code.
-* **Shared AI Brain:** Syncs context seamlessly across Cursor, Windsurf, and Claude Code.
-* **EverMemOS Powered:** Leverages the robust categorizations of Profile, Episodic, and EventLog memory to ensure high-fidelity context injection.
+- **Universal Compatibility** — Works with any MCP-compatible tool: Cursor, Windsurf, Claude Code, Cline, Roo Code, and more.
+- **Conversational Saving** — Just tell your AI: *"Save the decision that we are using Tailwind for this project."*
+- **Autonomous Retrieval** — The AI automatically searches your memory bank before writing code.
+- **Shared AI Brain** — Syncs context seamlessly across all your AI development tools.
+- **Full Memory Lifecycle** — Save, search, browse, and delete memories. Supports all four EverMemOS memory types: Profile, Episodic, EventLog, and Foresight.
+- **Multiple Retrieval Strategies** — Keyword, vector, hybrid, and LLM-guided agentic retrieval.
 
 ---
 
-## 🛠️ Installation & Setup
+## Available Tools
+
+CodeMem exposes six MCP tools to your IDE's AI:
+
+| Tool | Description | Memory Type |
+|:---|:---|:---|
+| `save_project_decision` | Save architectural decisions, bug fix patterns, or important context | Episodic / EventLog |
+| `search_project_memory` | Search past decisions and context using hybrid or agentic retrieval | Episodic + Profile |
+| `add_developer_preference` | Save coding style rules and preferences | Profile |
+| `list_recent_memories` | Browse saved memories by type with pagination | All types |
+| `delete_memory` | Delete a specific memory by ID or clear by type | All types |
+| `add_foresight_todo` | Record future tasks, tech debt, or planned improvements | Foresight |
+
+---
+
+## Installation & Setup
 
 ### 1. Build the Server
-
-Clone the repository and build the MCP server locally:
 
 ```bash
 git clone https://github.com/zhangshi0512/CodeMem.git
@@ -46,27 +58,29 @@ GROUP_ID=project_name
 
 ---
 
-## 🔌 Connecting to AI Platforms
+## Connecting to AI Platforms
 
-Because CodeMem is a standard MCP server, connecting it to your favorite tools is easy. You will point the tool to the `dist/index.js` file generated during the build step.
+Because CodeMem is a standard MCP server, connecting it to your favorite tools is straightforward. Point the tool to the `dist/index.js` file generated during the build step.
 
-*(Note: Replace `/absolute/path/to/CodeMem` with the actual path on your machine).*
+> Replace `/absolute/path/to/CodeMem` with the actual path on your machine.
 
-### 🖥️ Cursor
+### Cursor
+
 1. Open Cursor and go to **Settings** > **Features** > **MCP Servers**
 2. Click **+ Add new MCP server**
-3. Configure it as follows:
-   * **Name:** `codemem`
-   * **Type:** `command`
-   * **Command:** `node`
-   * **Args:** `/absolute/path/to/CodeMem/dist/index.js`
-4. Make sure your `.env` file is in the CodeMem directory, as the script will read it automatically.
+3. Configure:
+   - **Name:** `codemem`
+   - **Type:** `command`
+   - **Command:** `node`
+   - **Args:** `/absolute/path/to/CodeMem/dist/index.js`
+4. The script reads your `.env` file automatically.
 
-### 🏄 Windsurf
+### Windsurf
+
 1. Open your global Windsurf MCP configuration file:
-   * **Mac/Linux:** `~/.codeium/windsurf/mcp_config.json`
-   * **Windows:** `%USERPROFILE%\.codeium\windsurf\mcp_config.json`
-2. Add the `codemem` server to the `mcpServers` object. You can pass environment variables directly here:
+   - **Mac/Linux:** `~/.codeium/windsurf/mcp_config.json`
+   - **Windows:** `%USERPROFILE%\.codeium\windsurf\mcp_config.json`
+2. Add the `codemem` server:
 
 ```json
 {
@@ -83,35 +97,85 @@ Because CodeMem is a standard MCP server, connecting it to your favorite tools i
   }
 }
 ```
+
 3. Save the file and reload Windsurf.
 
-### ⌨️ Claude Code (CLI)
-Claude Code is built entirely around MCP. To add CodeMem to your CLI assistant:
+### Claude Code (CLI)
 
-1. Open your terminal and run:
+Claude Code has native MCP support. Add CodeMem with:
+
 ```bash
 claude mcp add codemem node /absolute/path/to/CodeMem/dist/index.js
 ```
-2. Claude Code will automatically detect the tools (`save_project_decision`, `search_project_memory`, `add_developer_preference`).
 
-### 🤖 Other MCP-Compatible Tools (Antigravity, Roo Code, Cline)
-Any next-generation AI coding tool that supports MCP clients will work. Simply provide the launch command:
+Claude Code will automatically detect all six tools.
+
+### Other MCP-Compatible Tools (Cline, Roo Code, Antigravity, etc.)
+
+Any AI tool that supports MCP clients will work. Provide the launch command:
 `node /absolute/path/to/CodeMem/dist/index.js` and ensure the `.env` file is accessible.
 
-*(Note: GitHub Copilot / Codex does not natively support the open MCP standard at this time).*
+> **Note:** GitHub Copilot / Codex does not natively support the open MCP standard at this time.
 
 ---
 
-## 🗣️ How to Use It
+## How to Use It
 
-Once connected, simply talk to your AI naturally! The AI knows *what* the tools do and *when* to use them.
+Once connected, talk to your AI naturally. The AI knows what the tools do and when to use them.
 
-**Saving a Preference:**
-> "Hey, we just decided to use Zustand for state management. Please save that to project memory."
+**Saving a decision:**
+> "We just decided to use Zustand for state management. Save that to project memory."
 
-**Setting a Developer Profile:**
-> "Write a fetch function. Remember, I always want error handling to use standard Try/Catch blocks. Save that preference."
+**Setting a preference:**
+> "I always want error handling to use Try/Catch blocks. Save that preference."
 
-**Recalling Context:**
-> "Create a new database schema for the user profile."
-*(The AI will autonomously search CodeMem to find out what database syntax you prefer before writing the code).*
+**Searching context:**
+> "What database did we decide to use for this project?"
+
+**Browsing all memories:**
+> "List all the project decisions we've saved so far."
+
+**Recording tech debt:**
+> "We need to add rate limiting to the API before launch. Record that as a future task."
+
+**Deleting outdated context:**
+> "Delete the memory about using MongoDB — we switched to PostgreSQL."
+
+---
+
+## Architecture
+
+```
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   Cursor     │    │  Windsurf    │    │  Claude Code │
+│   (MCP)      │    │  (MCP)       │    │  (MCP)       │
+└──────┬───────┘    └──────┬───────┘    └──────┬───────┘
+       │                   │                   │
+       └───────────────────┼───────────────────┘
+                           │
+                    ┌──────▼───────┐
+                    │   CodeMem    │
+                    │  MCP Server  │
+                    │  (stdio)     │
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │  EverMemOS   │
+                    │  Cloud API   │
+                    └──────────────┘
+```
+
+---
+
+## Tech Stack
+
+- **Runtime:** Node.js + TypeScript
+- **Protocol:** Model Context Protocol (MCP) via `@modelcontextprotocol/sdk`
+- **Memory Backend:** EverMemOS Cloud API
+- **HTTP Client:** Axios
+
+---
+
+## License
+
+ISC
