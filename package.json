@@ -1,0 +1,33 @@
+{
+  "name": "codemem",
+  "version": "1.0.0",
+  "description": "A VSCode/Cursor extension that acts as a \"Long-Term Pair Programmer\". As you code, it quietly observes and extracts EventLog Memory (architectural decisions, bug fixes) and Profile Memory (your preferred coding style). When you ask it a question, it uses EverMemOS to retrieve project-specific context that standard LLMs forget.",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhangshi0512/CodeMem.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/zhangshi0512/CodeMem/issues"
+  },
+  "homepage": "https://github.com/zhangshi0512/CodeMem#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "axios": "^1.13.6",
+    "dotenv": "^17.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.5",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
