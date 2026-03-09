@@ -48,6 +48,53 @@ export interface DeleteMemoriesRequest {
   memory_type?: 'profile' | 'episodic_memory' | 'foresight' | 'event_log';
 }
 
+export interface GetRequestStatusResponse {
+  success: boolean;
+  found?: boolean;
+  data?: {
+    request_id?: string;
+    status?: string;
+    url?: string;
+    method?: string;
+    http_code?: number;
+    time_ms?: number;
+    start_time?: number;
+    end_time?: number;
+    ttl_seconds?: number;
+  } | null;
+  message?: string | null;
+}
+
+export interface ConversationMetaRequest {
+  group_id?: string;
+}
+
+export interface ConversationMetaPatchRequest {
+  group_id?: string;
+  description?: string | null;
+  scene_desc?: Record<string, any> | null;
+  llm_custom_setting?: {
+    boundary?: {
+      provider: 'openrouter';
+      model: 'qwen/qwen3-235b-a22b-2507' | 'openai/gpt-4.1-mini';
+      extra?: Record<string, any> | null;
+    } | null;
+    extraction?: {
+      provider: 'openrouter';
+      model: 'qwen/qwen3-235b-a22b-2507' | 'openai/gpt-4.1-mini';
+      extra?: Record<string, any> | null;
+    } | null;
+  } | null;
+  tags?: string[] | null;
+  user_details?: Record<string, {
+    full_name?: string | null;
+    role?: 'user' | 'assistant' | null;
+    custom_role?: string | null;
+    extra?: Record<string, any> | null;
+  }> | null;
+  default_timezone?: string | null;
+}
+
 export class EverMemClient {
   private client: AxiosInstance;
 
@@ -140,6 +187,54 @@ export class EverMemClient {
     } catch (error: any) {
       console.error('Error deleting memories from EverMemOS:', error.response?.data || error.message);
       throw new Error(`Failed to delete memories: ${error.response?.data?.message || error.message}`);
+    }
+  }
+
+  /**
+   * Query async request processing status (GET /api/v0/status/request)
+   */
+  async getRequestStatus(request_id: string): Promise<GetRequestStatusResponse> {
+    try {
+      const response = await this.client.request({
+        method: 'GET',
+        url: '/api/v0/status/request',
+        params: { request_id }
+      });
+      return response.data;
+    } catch (error: any) {
+      console.error('Error getting request status from EverMemOS:', error.response?.data || error.message);
+      throw new Error(`Failed to get request status: ${error.response?.data?.message || error.message}`);
+    }
+  }
+
+  /**
+   * Retrieve conversation metadata (GET /api/v0/memories/conversation-meta)
+   */
+  async getConversationMeta(request: ConversationMetaRequest = {}) {
+    try {
+      const response = await this.client.request({
+        method: 'GET',
+        url: '/api/v0/memories/conversation-meta',
+        params: request.group_id ? { group_id: request.group_id } : undefined,
+        data: request.group_id ? { group_id: request.group_id } : {}
+      });
+      return response.data;
+    } catch (error: any) {
+      console.error('Error getting conversation metadata from EverMemOS:', error.response?.data || error.message);
+      throw new Error(`Failed to get conversation metadata: ${error.response?.data?.message || error.message}`);
+    }
+  }
+
+  /**
+   * Update conversation metadata (PATCH /api/v0/memories/conversation-meta)
+   */
+  async updateConversationMeta(request: ConversationMetaPatchRequest) {
+    try {
+      const response = await this.client.patch('/api/v0/memories/conversation-meta', request);
+      return response.data;
+    } catch (error: any) {
+      console.error('Error updating conversation metadata in EverMemOS:', error.response?.data || error.message);
+      throw new Error(`Failed to update conversation metadata: ${error.response?.data?.message || error.message}`);
     }
   }
 }

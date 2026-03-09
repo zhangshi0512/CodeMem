@@ -4,7 +4,7 @@ A **Long-Term Pair Programmer** built on the [Model Context Protocol (MCP)](http
 
 CodeMem acts as a universal, persistent memory backend for your AI coding assistants. It quietly extracts **architectural decisions**, **coding preferences**, and **project context** into a cloud-synced memory vault powered by EverMemOS.
 
-When your AI IDE writes code, it autonomously queries CodeMem to retrieve project-specific context that standard LLMs forget between sessions. Because the memory lives in the cloud, **all your AI tools share the same brain** — save a preference in Claude Code, and Cursor knows about it instantly.
+When your AI IDE writes code, it autonomously queries CodeMem to retrieve project-specific context that standard LLMs forget between sessions. Because the memory lives in the cloud, your compatible AI tools can share memory for the same user identity across sessions and projects.
 
 ---
 
@@ -17,23 +17,27 @@ When your AI IDE writes code, it autonomously queries CodeMem to retrieve projec
 - **Conversational Saving** — Just tell your AI: *"Save the decision that we are using Tailwind for this project."*
 - **Autonomous Retrieval** — The AI automatically searches your memory bank before writing code.
 - **Shared AI Brain** — Syncs context seamlessly across all your AI development tools.
-- **Full Memory Lifecycle** — Save, search, browse, and delete memories. Supports all four EverMemOS memory types: Profile, Episodic, EventLog, and Foresight.
+- **Full Memory Lifecycle** — Save, search, browse, and delete memories with safety checks and status tracking.
 - **Multiple Retrieval Strategies** — Keyword, vector, hybrid, and LLM-guided agentic retrieval.
+- **Hierarchical Decision Writes** — Important decisions are stored in both narrative and atomic-fact formats to improve retrieval depth.
+- **Conversation Metadata Control** — Read and update conversation metadata to tune extraction/retrieval behavior.
 
 ---
 
 ## Available Tools
 
-CodeMem exposes six MCP tools to your IDE's AI:
+CodeMem exposes eight MCP tools to your IDE's AI:
 
 | Tool | Description | Memory Type |
 |:---|:---|:---|
-| `save_project_decision` | Save architectural decisions, bug fix patterns, or important context | Episodic / EventLog |
-| `search_project_memory` | Search past decisions and context. Supports scope control: "session" (current session), "repo" (all sessions in project, default), "all" (global). Uses hybrid or agentic retrieval. | Episodic + Profile |
+| `save_project_decision` | Save architectural decisions with dual writes (narrative + atomic fact). Optional async wait for ingestion completion. | Episodic + Event-like |
+| `search_project_memory` | Search past decisions and context with scope control: "session", "repo", "all" (all projects for current user). Supports retrieval orchestration and agentic fallback. | Episodic + Profile |
 | `add_developer_preference` | Save coding style rules and preferences | Profile |
 | `list_recent_memories` | Browse saved memories by type with pagination | All types |
-| `delete_memory` | Delete a specific memory by ID or clear by type | All types |
+| `delete_memory` | Delete by ID or bulk delete by type (requires explicit confirmation) | All types |
 | `add_foresight_todo` | Record future tasks, tech debt, or planned improvements | Foresight |
+| `get_conversation_meta` | Retrieve group conversation metadata used by EverMemOS extraction/retrieval | Meta |
+| `update_conversation_meta` | Update metadata fields (tags, timezone, scene, user details, llm settings) | Meta |
 
 ---
 
@@ -43,15 +47,15 @@ CodeMem automatically detects your development context, eliminating manual confi
 
 ### User ID (Automatic)
 CodeMem identifies you in this priority order:
-1. **GitHub API** — Uses `GITHUB_TOKEN` if available (for enterprise users with different usernames)
-2. **Git Config** — Reads `git config user.name` (your GitHub username if properly configured)
-3. **System Username** — Falls back to `USER` or `USERNAME` environment variable
-4. **Override** — Set `USER_ID` env var to manually specify
+1. **Override** — Set `USER_ID` env var to manually specify
+2. **GitHub API** — Uses `GITHUB_TOKEN` if available (for enterprise users with different usernames)
+3. **Git Config** — Reads `git config user.name` (your GitHub username if properly configured)
+4. **System Username** — Falls back to `USER` or `USERNAME` environment variable
 
 ### Project ID (Automatic)
 CodeMem detects your project automatically:
-1. **Git Repository** — Uses the folder name of your git repo root (e.g., "CodeMem")
-2. **Override** — Set `GROUP_ID` env var to manually specify
+1. **Override** — Set `GROUP_ID` env var to manually specify
+2. **Git Repository** — Uses the folder name of your git repo root (e.g., "CodeMem")
 
 ### Platform Detection (Automatic)
 CodeMem detects which IDE/tool is using it:
@@ -98,7 +102,7 @@ When searching memories, you can control the scope of retrieval using the `scope
 |-------|-----------|----------|
 | **`session`** | Current session only | Fresh context for isolated tasks; avoids outdated decisions |
 | **`repo`** (default) | All sessions in this project | Maintain project consistency; leverage all accumulated knowledge |
-| **`all`** | Across all projects (future) | Global patterns and learnings across projects |
+| **`all`** | All projects for current user | Reuse personal patterns across repositories |
 
 ### Usage Examples
 
@@ -171,8 +175,8 @@ MEMORY_SCOPE=repo
 ```
 
 **Auto-Detection Priority:**
-- `USER_ID`: GitHub token API → git config user.name → system username → env var
-- `GROUP_ID`: git repository folder name → env var
+- `USER_ID`: env var override → GitHub token API → git config user.name → system username
+- `GROUP_ID`: env var override → git repository folder name
 - `PLATFORM`: Explicit env var → IDE-specific env vars → parent process name → wmic (Windows) → "unknown"
 - `SESSION_ID`: Auto-generated unique ID per MCP invocation (cannot be overridden)
 
@@ -254,8 +258,8 @@ claude mcp add codemem node /absolute/path/to/CodeMem/dist/index.js \
 
 **Auto-Detection:**
 CodeMem will automatically detect:
-- `USER_ID` from GitHub config or system username
-- `GROUP_ID` from git repository folder name
+- `USER_ID` from env override, GitHub config, or system username
+- `GROUP_ID` from env override or git repository folder name
 - `PLATFORM` from environment variables or parent process (detects "claude-code" automatically)
 - `SESSION_ID` generates a unique ID for this invocation
 
@@ -300,6 +304,9 @@ You can also use CodeMem manually by talking to your AI naturally:
 **Saving a decision:**
 > "We just decided to use Zustand for state management. Save that to project memory."
 
+**Saving and waiting for ingestion completion:**
+> "Call save_project_decision with wait_for_completion=true and timeout_seconds=30."
+
 **Setting a preference:**
 > "I always want error handling to use Try/Catch blocks. Save that preference."
 
@@ -316,7 +323,7 @@ You can also use CodeMem manually by talking to your AI naturally:
 **Searching across all knowledge:**
 > "Search all project memories for authentication patterns we've used."
 >
-> Result: Shows all authentication patterns created across all sessions and platforms
+> Result: Shows patterns across all repositories for the current user identity
 
 **Browsing all memories:**
 > "List all the project decisions we've saved so far."
@@ -326,6 +333,9 @@ You can also use CodeMem manually by talking to your AI naturally:
 
 **Deleting outdated context:**
 > "Delete the memory about using MongoDB — we switched to PostgreSQL."
+
+**Bulk delete safely (explicit confirmation required):**
+> "Delete all `event_log` memories with confirm=true."
 
 ---
 
@@ -359,6 +369,14 @@ You can also use CodeMem manually by talking to your AI naturally:
 - **Protocol:** Model Context Protocol (MCP) via `@modelcontextprotocol/sdk`
 - **Memory Backend:** EverMemOS Cloud API
 - **HTTP Client:** Axios
+
+---
+
+## Competition Alignment (Genesis)
+
+- **Quality & Execution:** Adds safer delete controls, deterministic scope semantics, and request lifecycle visibility.
+- **Memory Integration:** Uses dual-write decision storage (narrative + atomic fact), scoped retrieval, and conversation metadata controls.
+- **Memory -> Reasoning -> Action Loop:** Search-first prompts + decision/preference/todo capture + optional ingestion completion checks.
 
 ---
 

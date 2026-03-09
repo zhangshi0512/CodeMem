@@ -1,3 +1,5 @@
+import { execSync, spawnSync } from 'child_process';
+import dotenv from 'dotenv';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -8,84 +10,74 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-import dotenv from 'dotenv';
-import { execSync } from 'child_process';
-import { EverMemClient } from './evermind-client.js';
+import { AddMemoryRequest, EverMemClient } from './evermind-client.js';
+import {
+  buildSearchFilters,
+  chooseRetrieveMethod,
+  getPlatformFromMessageId,
+  getSessionFromMessageId,
+  isBulkDelete,
+  normalizeScope,
+} from './policies.js';
 
-// Load environment variables
 dotenv.config();
 
 const EVERMEM_API_KEY = process.env.EVERMEM_API_KEY;
-
 if (!EVERMEM_API_KEY) {
-  console.error("EVERMEM_API_KEY environment variable is not set.");
+  console.error('EVERMEM_API_KEY environment variable is not set.');
   process.exit(1);
 }
 
-// ─── Auto-Detection Functions ───────────────────────────────────────────────
-/**
- * Detect GitHub username with fallback to local username
- * Priority: GitHub token API → git config user.name → local username → env var
- */
 function detectUserID(): string {
-  // 1. Try GitHub API with token (enterprise users)
+  // Env override must win.
+  if (process.env.USER_ID) return process.env.USER_ID;
+
   const ghToken = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
   if (ghToken) {
     try {
-      const response = execSync(`gh api user.login`, { encoding: 'utf-8' }).trim();
+      const response = execSync('gh api user --jq .login', { encoding: 'utf-8' }).trim();
       if (response) return response;
-    } catch (e) {
-      // GitHub CLI not available or token invalid, continue to next method
+    } catch {
+      // Continue fallbacks
     }
   }
 
-  // 2. Try git config user.name
   try {
     const gitUsername = execSync('git config user.name', { encoding: 'utf-8' }).trim();
     if (gitUsername) return gitUsername;
-  } catch (e) {
-    // Not in git repo or git not available
+  } catch {
+    // Continue fallbacks
   }
 
-  // 3. Try git config user.email (extract username part)
   try {
     const gitEmail = execSync('git config user.email', { encoding: 'utf-8' }).trim();
     const username = gitEmail.split('@')[0];
     if (username) return username;
-  } catch (e) {
-    // Not in git repo or git not available
+  } catch {
+    // Continue fallbacks
   }
 
-  // 4. Fall back to system username
   const systemUser = process.env.USER || process.env.USERNAME;
   if (systemUser) return systemUser;
 
-  // 5. Final fallback: env var or default
-  return process.env.USER_ID || 'codemem_user';
+  return 'codemem_user';
 }
 
-/**
- * Detect project/group name from git repo
- * Priority: git repo root folder name → env var → default
- */
 function detectGroupID(): string {
-  // 1. Try to get git repository root and use folder name
+  // Env override must win.
+  if (process.env.GROUP_ID) return process.env.GROUP_ID;
+
   try {
     const repoRoot = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8' }).trim();
-    const projectName = repoRoot.split(/[\\\/]/).pop();
+    const projectName = repoRoot.split(/[\\/]/).pop();
     if (projectName) return projectName;
-  } catch (e) {
-    // Not in git repo
+  } catch {
+    // Continue fallback
   }
 
-  // 2. Fall back to env var or default
-  return process.env.GROUP_ID || 'codemem_workspace';
+  return 'codemem_workspace';
 }
 
-/**
- * Generate unique session ID that persists for this MCP server instance
- * Format: YYYYMMDD-HHMMSS-randomstring
- */
 function generateSessionID(): string {
   const now = new Date();
   const date = now.toISOString().slice(0, 10).replace(/-/g, '');
@@ -94,75 +86,122 @@ function generateSessionID(): string {
   return `${date}-${time}-${random}`;
 }
 
-/**
- * Detect which platform/IDE is running CodeMem
- * Priority: explicit env var → IDE-specific env vars → parent process → default
- */
 function detectPlatform(): string {
-  // 1. Explicit override
-  if (process.env.PLATFORM) {
-    return process.env.PLATFORM;
-  }
+  if (process.env.PLATFORM) return process.env.PLATFORM;
 
-  // 2. Check for IDE-specific environment variables
   if (process.env.CURSOR_ENVIRONMENT) return 'cursor';
-  if (process.env.WINDSURF_HOME) return 'windsurf';
-  if (process.env.CODEIUM_WINDSURF) return 'windsurf';
-  if (process.env.CLAUDE_CODE) return 'claude-code';
-  if (process.env.CLAUDE_VERSION) return 'claude-code';
+  if (process.env.WINDSURF_HOME || process.env.CODEIUM_WINDSURF) return 'windsurf';
+  if (process.env.CLAUDE_CODE || process.env.CLAUDE_VERSION) return 'claude-code';
 
-  // 3. Check parent process name
   try {
-    const { spawnSync } = require('child_process');
     const result = spawnSync('ps', ['-p', process.ppid.toString(), '-o', 'comm='], { encoding: 'utf-8' });
     const parentProcess = result.stdout?.trim().toLowerCase() || '';
-
     if (parentProcess.includes('cursor')) return 'cursor';
     if (parentProcess.includes('windsurf')) return 'windsurf';
     if (parentProcess.includes('claude')) return 'claude-code';
     if (parentProcess.includes('cline')) return 'cline';
-    if (parentProcess.includes('node')) {
-      // Running directly with node, check ARGV
-      if (process.argv.some(arg => arg.includes('claude'))) return 'claude-code';
-      if (process.argv.some(arg => arg.includes('cursor'))) return 'cursor';
-      if (process.argv.some(arg => arg.includes('windsurf'))) return 'windsurf';
-    }
-  } catch (e) {
-    // ps command not available (Windows), continue to next detection
+  } catch {
+    // Continue to Windows fallback
   }
 
-  // 4. Windows-specific detection (using wmic or tasklist)
   if (process.platform === 'win32') {
     try {
-      const { execSync } = require('child_process');
       const parent = execSync(`wmic process where processid=${process.ppid} get name`, { encoding: 'utf-8' });
       const parentName = parent.split('\n')[1]?.trim().toLowerCase() || '';
-
       if (parentName.includes('cursor')) return 'cursor';
       if (parentName.includes('windsurf')) return 'windsurf';
       if (parentName.includes('claude')) return 'claude-code';
-    } catch (e) {
-      // wmic not available
+    } catch {
+      // Fallback below
     }
   }
 
-  // 5. Default fallback
   return 'unknown';
 }
 
-// Auto-detect or use env var overrides
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function logEvent(level: 'info' | 'warn' | 'error', event: string, meta: Record<string, unknown> = {}) {
+  const payload = {
+    ts: new Date().toISOString(),
+    level,
+    event,
+    ...meta,
+  };
+  const line = JSON.stringify(payload);
+  if (level === 'error') console.error(line);
+  else if (level === 'warn') console.warn(line);
+  else console.error(line);
+}
+
 const DEFAULT_USER_ID = detectUserID();
 const DEFAULT_GROUP_ID = detectGroupID();
 const SESSION_ID = generateSessionID();
-const DEFAULT_MEMORY_SCOPE = process.env.MEMORY_SCOPE || 'repo'; // 'session' | 'repo' | 'all'
-const PLATFORM = detectPlatform(); // 'claude-code' | 'cursor' | 'windsurf' | 'cline' | 'unknown'
-
+const DEFAULT_MEMORY_SCOPE = normalizeScope(undefined, process.env.MEMORY_SCOPE || 'repo');
+const PLATFORM = detectPlatform();
 const evermem = new EverMemClient(EVERMEM_API_KEY);
+
+type WaitOptions = {
+  wait_for_completion?: boolean;
+  timeout_seconds?: number;
+  poll_interval_ms?: number;
+};
+
+async function waitForRequestCompletion(
+  requestId: string,
+  timeoutSeconds: number = 20,
+  pollIntervalMs: number = 1500
+) {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+
+  while (Date.now() < deadline) {
+    const statusResult = await evermem.getRequestStatus(requestId);
+    const status = statusResult?.data?.status?.toLowerCase();
+    if (status === 'success' || status === 'failed' || status === 'error') {
+      return { status, raw: statusResult };
+    }
+    await sleep(pollIntervalMs);
+  }
+
+  return { status: 'timeout', raw: null };
+}
+
+function buildMessageId(prefix: string): string {
+  return `${prefix}_${SESSION_ID}_${PLATFORM}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+}
+
+async function addMemoryWithOptionalWait(payload: AddMemoryRequest, options: WaitOptions = {}) {
+  const start = Date.now();
+  const result = await evermem.addMemory(payload);
+  const requestId = result?.request_id as string | undefined;
+
+  if (options.wait_for_completion && requestId) {
+    const final = await waitForRequestCompletion(
+      requestId,
+      options.timeout_seconds ?? 20,
+      options.poll_interval_ms ?? 1500
+    );
+    logEvent('info', 'memory.add.waited', {
+      request_id: requestId,
+      final_status: final.status,
+      duration_ms: Date.now() - start,
+    });
+    return { result, finalStatus: final.status };
+  }
+
+  logEvent('info', 'memory.add.queued', {
+    request_id: requestId,
+    duration_ms: Date.now() - start,
+  });
+  return { result, finalStatus: 'queued' };
+}
 
 const server = new Server(
   {
     name: 'CodeMem',
-    version: '1.0.0',
+    version: '1.1.0',
   },
   {
     capabilities: {
@@ -172,25 +211,20 @@ const server = new Server(
   }
 );
 
-// ─── Prompts ───────────────────────────────────────────────────────────────────
-// MCP Prompts inject instructions into the IDE's LLM context.
-// The "auto-save" prompt tells the AI to automatically save decisions and TODOs
-// at the end of each coding task without requiring the user to ask.
-
 server.setRequestHandler(ListPromptsRequestSchema, async () => {
   return {
     prompts: [
       {
         name: 'codemem-auto',
-        description: 'Auto-save mode: Instructs the AI to automatically save architectural decisions, coding preferences, and tech debt discovered during the coding session. No manual "save" commands needed.',
+        description: 'Auto-save mode: AI saves important decisions, preferences, and tech debt automatically.',
       },
       {
         name: 'codemem-context',
-        description: 'Context-aware mode: Instructs the AI to search project memory before writing any new code, ensuring consistency with past decisions.',
+        description: 'Context-aware mode: AI searches project memory before writing significant code.',
       },
       {
         name: 'codemem-full',
-        description: 'Full autopilot mode: Combines auto-save and context-aware modes. The AI automatically retrieves relevant memories before coding AND saves new decisions afterward.',
+        description: 'Full mode: combines context-aware retrieval + auto-save behaviors.',
       },
     ],
   };
@@ -201,99 +235,71 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 
   const autoSaveInstructions = `## CodeMem Auto-Save Instructions
 
-You have access to CodeMem, a persistent project memory system. Follow these rules automatically throughout this session:
+You have access to CodeMem persistent memory.
 
-**Context:** CodeMem is configured for user "${DEFAULT_USER_ID}" in project "${DEFAULT_GROUP_ID}". This session has ID "${SESSION_ID}" for tracking memories across coding sessions. Platform: "${PLATFORM}".
+Context: user "${DEFAULT_USER_ID}", group "${DEFAULT_GROUP_ID}", session "${SESSION_ID}", platform "${PLATFORM}".
 
-**After completing any coding task, silently save important context:**
-- If an architectural decision was made (e.g., chose a library, database, pattern, or approach), call \`save_project_decision\` with a concise summary of the decision and reasoning.
-- If you discovered or inferred a coding preference from the user (e.g., naming conventions, error handling style, framework preferences), call \`add_developer_preference\`.
-- If there is unfinished work, tech debt, or a follow-up task identified, call \`add_foresight_todo\`.
+After each significant task, save:
+- architectural decisions via \`save_project_decision\`
+- coding preferences via \`add_developer_preference\`
+- future tasks/tech debt via \`add_foresight_todo\`
 
-**Rules:**
-- Save silently — do NOT ask the user for permission to save. Just do it.
-- Be concise — save the essence of the decision, not verbose explanations.
-- Do NOT save trivial or obvious information (e.g., "created a file called index.ts").
-- Do NOT duplicate — if you already saved something similar earlier in this session, skip it.
-- Save at natural task boundaries (after implementing a feature, fixing a bug, or making a design choice).
-- Memories are automatically tagged with this session ID to allow filtering by coding session if needed.`;
+Rules:
+- save silently
+- avoid duplicates
+- skip trivial details`;
 
   const contextAwareInstructions = `## CodeMem Context-Aware Instructions
 
-You have access to CodeMem, a persistent project memory system. Follow these rules automatically throughout this session:
-
-**Context:** CodeMem is configured for user "${DEFAULT_USER_ID}" in project "${DEFAULT_GROUP_ID}". Current session ID is "${SESSION_ID}". Platform: "${PLATFORM}".
-
-**Before writing any significant new code, search for relevant context:**
-- Call \`search_project_memory\` with a query related to the task at hand.
-- Check for existing architectural decisions, preferred patterns, or relevant past context.
-- Respect any developer preferences found in memory (coding style, libraries, conventions).
-- Use scope parameter to control context: "session" (current session only), "repo" (all sessions in this project, default), "all" (across all projects).
-- Note: Results show session info in brackets — check if memory is from current session [current session] or a previous one [session: xxxxxx-xxxxxx].
-
-**Rules:**
-- Search silently — do NOT announce that you are searching memory, just do it.
-- If memory results conflict with the current request, mention the conflict to the user.
-- Use the "agentic" retrieve method for complex or multi-faceted queries.
-- For most tasks, use "repo" scope to maintain project consistency. Use "session" scope only when you need fresh context from just this coding session.
-- Note: Search results show platform info (e.g., [current via claude-code], [session-xxx via cursor]) to help you understand which tool created each memory.`;
+Before significant code changes, search project memory:
+- call \`search_project_memory\`
+- respect existing decisions/preferences unless current request overrides them
+- use scope intentionally: session/repo/all`;
 
   switch (name) {
     case 'codemem-auto':
       return {
         description: 'Auto-save mode for CodeMem',
-        messages: [
-          {
-            role: 'user' as const,
-            content: { type: 'text' as const, text: autoSaveInstructions },
-          },
-        ],
+        messages: [{ role: 'user' as const, content: { type: 'text' as const, text: autoSaveInstructions } }],
       };
-
     case 'codemem-context':
       return {
         description: 'Context-aware mode for CodeMem',
-        messages: [
-          {
-            role: 'user' as const,
-            content: { type: 'text' as const, text: contextAwareInstructions },
-          },
-        ],
+        messages: [{ role: 'user' as const, content: { type: 'text' as const, text: contextAwareInstructions } }],
       };
-
     case 'codemem-full':
       return {
-        description: 'Full autopilot mode for CodeMem (auto-save + context-aware)',
+        description: 'Full autopilot mode for CodeMem',
         messages: [
           {
             role: 'user' as const,
-            content: {
-              type: 'text' as const,
-              text: `${contextAwareInstructions}\n\n${autoSaveInstructions}`,
-            },
+            content: { type: 'text' as const, text: `${contextAwareInstructions}\n\n${autoSaveInstructions}` },
           },
         ],
       };
-
     default:
       throw new McpError(ErrorCode.InvalidRequest, `Unknown prompt: ${name}`);
   }
 });
 
-// ─── Tools ─────────────────────────────────────────────────────────────────────
-// Define the tools we expose to the IDE
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
         name: 'save_project_decision',
-        description: 'Save an architectural decision, bug fix pattern, or important context to the project\'s long-term memory. Use this when you make or learn about a significant technical choice.',
+        description:
+          'Save a technical decision with dual writes: narrative context + atomic fact for stronger hierarchical retrieval.',
         inputSchema: {
           type: 'object',
           properties: {
-            content: {
-              type: 'string',
-              description: 'The content of the decision or context to save (e.g., "We chose PostgreSQL over MongoDB for the user data because we need relational joins").',
+            content: { type: 'string', description: 'Architectural decision and concise rationale.' },
+            wait_for_completion: {
+              type: 'boolean',
+              description: 'If true, poll request status until completion or timeout.',
+            },
+            timeout_seconds: {
+              type: 'number',
+              description: 'Polling timeout when wait_for_completion is true. Default 20.',
             },
           },
           required: ['content'],
@@ -301,23 +307,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'search_project_memory',
-        description: 'Search the project\'s memory for past decisions, context, or code patterns. Use this before writing code to check if relevant decisions or preferences already exist.',
+        description:
+          'Search memory with scope control. Retrieval method is auto-orchestrated unless explicitly provided.',
         inputSchema: {
           type: 'object',
           properties: {
-            query: {
-              type: 'string',
-              description: 'What to search for (e.g., "What database do we use?", "authentication approach").',
-            },
+            query: { type: 'string', description: 'Search query.' },
             retrieve_method: {
               type: 'string',
               enum: ['hybrid', 'agentic', 'keyword', 'vector'],
-              description: 'Retrieval strategy. "hybrid" (default) combines keyword + vector search. "agentic" uses LLM-guided multi-round retrieval for complex queries.',
+              description: 'Optional explicit retrieval method. If omitted, CodeMem chooses automatically.',
             },
             scope: {
               type: 'string',
               enum: ['session', 'repo', 'all'],
-              description: 'Memory scope: "session" (current session only), "repo" (all sessions in current repo, default), "all" (across all repos/users).',
+              description: 'session=current session, repo=current project, all=all projects for current user.',
             },
           },
           required: ['query'],
@@ -325,13 +329,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'add_developer_preference',
-        description: 'Save a developer preference or coding style rule as Profile memory (e.g., "always use strict TypeScript", "prefer functional React components").',
+        description: 'Save a developer preference as profile memory.',
         inputSchema: {
           type: 'object',
           properties: {
-            preference: {
-              type: 'string',
-              description: 'The preference or rule to save.',
+            preference: { type: 'string', description: 'Preference or coding rule to store.' },
+            wait_for_completion: {
+              type: 'boolean',
+              description: 'If true, poll request status until completion or timeout.',
+            },
+            timeout_seconds: {
+              type: 'number',
+              description: 'Polling timeout when wait_for_completion is true. Default 20.',
             },
           },
           required: ['preference'],
@@ -339,41 +348,39 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'list_recent_memories',
-        description: 'Browse saved memories by type. Use this to see what decisions, facts, or preferences have been recorded, or to review project history.',
+        description: 'List memories by type with pagination.',
         inputSchema: {
           type: 'object',
           properties: {
             memory_type: {
               type: 'string',
               enum: ['episodic_memory', 'event_log', 'profile', 'foresight'],
-              description: 'Type of memory to list. "episodic_memory" for session summaries, "event_log" for atomic facts, "profile" for user preferences, "foresight" for future plans/TODOs.',
+              description: 'Memory type to list.',
             },
-            page: {
-              type: 'number',
-              description: 'Page number (starts from 1). Default: 1.',
-            },
-            page_size: {
-              type: 'number',
-              description: 'Number of results per page (max 100). Default: 10.',
-            },
+            page: { type: 'number', description: 'Page number (>= 1).' },
+            page_size: { type: 'number', description: 'Page size (<= 100).' },
           },
           required: [],
         },
       },
       {
         name: 'delete_memory',
-        description: 'Delete a specific memory by its ID, or delete all memories of a given type. Use with caution.',
+        description: 'Delete one memory by ID, or bulk-delete by memory_type with explicit confirmation.',
         inputSchema: {
           type: 'object',
           properties: {
             memory_id: {
               type: 'string',
-              description: 'The ID of the specific memory to delete. Use "__all__" to delete all matching memories (requires memory_type).',
+              description: 'Memory ID. Use "__all__" only for bulk delete.',
             },
             memory_type: {
               type: 'string',
               enum: ['episodic_memory', 'event_log', 'profile', 'foresight'],
-              description: 'Only delete memories of this type. Required when using "__all__".',
+              description: 'Required for bulk delete.',
+            },
+            confirm: {
+              type: 'boolean',
+              description: 'Must be true for bulk delete operations.',
             },
           },
           required: [],
@@ -381,273 +388,387 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'add_foresight_todo',
-        description: 'Record a future task, tech debt item, or planned improvement as Foresight memory. The system will remember these for later retrieval.',
+        description: 'Save a future task/tech debt item as foresight memory.',
         inputSchema: {
           type: 'object',
           properties: {
-            content: {
-              type: 'string',
-              description: 'The future task or plan (e.g., "Need to add rate limiting to the API before launch", "Refactor the auth module to use JWT instead of sessions").',
+            content: { type: 'string', description: 'Future task or plan.' },
+            wait_for_completion: {
+              type: 'boolean',
+              description: 'If true, poll request status until completion or timeout.',
+            },
+            timeout_seconds: {
+              type: 'number',
+              description: 'Polling timeout when wait_for_completion is true. Default 20.',
             },
           },
           required: ['content'],
+        },
+      },
+      {
+        name: 'get_conversation_meta',
+        description: 'Get conversation metadata for the current group or a specified group_id.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            group_id: {
+              type: 'string',
+              description: 'Optional group_id. Defaults to current project group.',
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'update_conversation_meta',
+        description: 'Update conversation metadata to tune extraction/retrieval behavior.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            group_id: { type: 'string', description: 'Optional group_id. Defaults to current project group.' },
+            description: { type: 'string', description: 'Conversation description.' },
+            tags: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Tags to apply.',
+            },
+            default_timezone: { type: 'string', description: 'Default timezone, e.g. America/Los_Angeles.' },
+            scene_desc: { type: 'object', description: 'Scene description object.' },
+            user_details: { type: 'object', description: 'Per-user metadata object.' },
+            llm_custom_setting: { type: 'object', description: 'Boundary/extraction model overrides.' },
+          },
+          required: [],
         },
       },
     ],
   };
 });
 
-// Handle tool execution
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  switch (request.params.name) {
-    case 'save_project_decision': {
-      const args = request.params.arguments as { content: string };
-      try {
-        const result = await evermem.addMemory({
-          message_id: `decision_${SESSION_ID}_${PLATFORM}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+  const toolStart = Date.now();
+  const toolName = request.params.name;
+
+  try {
+    switch (toolName) {
+      case 'save_project_decision': {
+        const args = request.params.arguments as { content: string } & WaitOptions;
+
+        const episodicPayload: AddMemoryRequest = {
+          message_id: buildMessageId('decisionepi'),
           create_time: new Date().toISOString(),
           sender: DEFAULT_USER_ID,
           role: 'assistant',
           group_id: DEFAULT_GROUP_ID,
-          content: args.content,
-          flush: true
-        });
-        return {
-          content: [{ type: 'text', text: `Decision saved to project memory. Request ID: ${result.request_id || 'queued'}` }],
+          content: `Architectural decision and rationale: ${args.content}`,
+          flush: true,
         };
-      } catch (error: any) {
+
+        const eventPayload: AddMemoryRequest = {
+          message_id: buildMessageId('decisionfact'),
+          create_time: new Date().toISOString(),
+          sender: DEFAULT_USER_ID,
+          role: 'assistant',
+          group_id: DEFAULT_GROUP_ID,
+          content: `Atomic engineering fact: ${args.content}`,
+          flush: true,
+        };
+
+        const [episodicResult, eventResult] = await Promise.all([
+          addMemoryWithOptionalWait(episodicPayload, args),
+          addMemoryWithOptionalWait(eventPayload, args),
+        ]);
+
         return {
-          content: [{ type: 'text', text: `Error saving decision: ${error.message}` }],
-          isError: true,
+          content: [
+            {
+              type: 'text',
+              text:
+                `Decision saved with hierarchical writes:\n` +
+                `- episodic request_id: ${episodicResult.result?.request_id || 'n/a'} status: ${episodicResult.finalStatus}\n` +
+                `- event-like request_id: ${eventResult.result?.request_id || 'n/a'} status: ${eventResult.finalStatus}`,
+            },
+          ],
         };
       }
-    }
 
-    case 'search_project_memory': {
-      const args = request.params.arguments as { query: string; retrieve_method?: string; scope?: string };
-      try {
-        const scope = args.scope || 'repo'; // Default to repo scope
+      case 'search_project_memory': {
+        const args = request.params.arguments as { query: string; retrieve_method?: string; scope?: string };
+        const scope = normalizeScope(args.scope, DEFAULT_MEMORY_SCOPE);
+        const searchFilters = buildSearchFilters(scope, DEFAULT_USER_ID, DEFAULT_GROUP_ID);
+        const selectedMethod = chooseRetrieveMethod(args.query, args.retrieve_method);
 
-        const result = await evermem.searchMemories({
-          user_id: DEFAULT_USER_ID,
-          group_ids: [DEFAULT_GROUP_ID],
-          query: args.query,
-          memory_types: ['episodic_memory', 'profile'],
-          retrieve_method: (args.retrieve_method as any) || 'hybrid',
-          top_k: 20 // Fetch more to filter by scope
-        });
+        let result: any;
+        let methodUsed = selectedMethod;
+        let fallbackUsed = false;
 
-        // Helper functions to extract metadata from message_id
-        const getSessionFromMessageId = (messageId: string): string | null => {
-          const match = messageId?.match?.(/^[^_]+_([^_]+)_/);
-          return match ? match[1] : null;
-        };
+        try {
+          result = await evermem.searchMemories({
+            ...searchFilters,
+            query: args.query,
+            memory_types: ['episodic_memory', 'profile'],
+            retrieve_method: selectedMethod,
+            top_k: 20,
+          });
+        } catch (error) {
+          if (selectedMethod === 'agentic') {
+            fallbackUsed = true;
+            methodUsed = 'hybrid';
+            result = await evermem.searchMemories({
+              ...searchFilters,
+              query: args.query,
+              memory_types: ['episodic_memory', 'profile'],
+              retrieve_method: 'hybrid',
+              top_k: 20,
+            });
+          } else {
+            throw error;
+          }
+        }
 
-        const getPlatformFromMessageId = (messageId: string): string | null => {
-          const match = messageId?.match?.(/^[^_]+_[^_]+_([^_]+)_/);
-          return match ? match[1] : null;
-        };
-
-        // Filter memories based on scope
         let filteredMemories = result?.result?.memories || [];
         if (scope === 'session') {
           filteredMemories = filteredMemories.filter((mem: any) => {
-            const memSession = getSessionFromMessageId(mem.id); // Try to get from original_data
-            if (mem.original_data?.[0]?.data[0]?.extend?.message_id) {
-              const origSession = getSessionFromMessageId(mem.original_data[0].data[0].extend.message_id);
-              return origSession === SESSION_ID;
-            }
-            return false;
-          });
-        }
-        // For 'repo' scope, use all results as-is
-
-        let formattedOutput = "";
-        let resultCount = 0;
-
-        if (filteredMemories.length > 0) {
-          filteredMemories.slice(0, 10).forEach((mem: any, index: number) => {
-            resultCount++;
-            // Extract session and platform info if available
-            let contextInfo = '';
-            if (mem.original_data?.[0]?.data[0]?.extend?.message_id) {
-              const msgId = mem.original_data[0].data[0].extend.message_id;
-              const memSession = getSessionFromMessageId(msgId);
-              const memPlatform = getPlatformFromMessageId(msgId);
-
-              const sessionLabel = memSession === SESSION_ID ? 'current' : memSession;
-              const platformLabel = memPlatform ? ` via ${memPlatform}` : '';
-              contextInfo = ` [${sessionLabel}${platformLabel}]`;
-            }
-
-            formattedOutput += `[${index + 1}] Type: ${mem.memory_type}${contextInfo}`;
-            if (mem.summary) formattedOutput += ` | Summary: ${mem.summary}`;
-            if (mem.atomic_fact) formattedOutput += ` | Fact: ${mem.atomic_fact}`;
-            if (mem.foresight) formattedOutput += ` | Plan: ${mem.foresight}`;
-            if (mem.timestamp) formattedOutput += ` | Time: ${mem.timestamp}`;
-            if (mem.score) formattedOutput += ` | Relevance: ${(mem.score * 100).toFixed(0)}%`;
-            formattedOutput += '\n';
+            const messageId = mem.original_data?.[0]?.data?.[0]?.extend?.message_id as string | undefined;
+            const session = getSessionFromMessageId(messageId || mem.id);
+            return session === SESSION_ID;
           });
         }
 
-        if (result?.result?.profiles?.length > 0) {
-          result.result.profiles.forEach((prof: any, index: number) => {
-            resultCount++;
+        let output = '';
+        let count = 0;
+        for (const [idx, mem] of filteredMemories.slice(0, 10).entries()) {
+          count += 1;
+          const messageId = mem.original_data?.[0]?.data?.[0]?.extend?.message_id as string | undefined;
+          const memSession = getSessionFromMessageId(messageId || mem.id);
+          const memPlatform = getPlatformFromMessageId(messageId || mem.id);
+          const sessionLabel = memSession ? (memSession === SESSION_ID ? 'current' : memSession) : 'unknown-session';
+          const platformLabel = memPlatform ? ` via ${memPlatform}` : '';
+
+          output += `[${idx + 1}] Type: ${mem.memory_type} [${sessionLabel}${platformLabel}]`;
+          if (mem.summary) output += ` | Summary: ${mem.summary}`;
+          if (mem.atomic_fact) output += ` | Fact: ${mem.atomic_fact}`;
+          if (mem.foresight) output += ` | Plan: ${mem.foresight}`;
+          if (mem.timestamp) output += ` | Time: ${mem.timestamp}`;
+          if (mem.score) output += ` | Relevance: ${(mem.score * 100).toFixed(0)}%`;
+          output += '\n';
+        }
+
+        const profiles = result?.result?.profiles || [];
+        if (scope !== 'session' && profiles.length > 0) {
+          for (const prof of profiles) {
+            count += 1;
             const label = prof.category || prof.trait_name || 'Preference';
-            formattedOutput += `[Profile] ${label}: ${prof.description}`;
-            if (prof.score) formattedOutput += ` | Relevance: ${(prof.score * 100).toFixed(0)}%`;
-            formattedOutput += '\n';
-          });
+            output += `[Profile] ${label}: ${prof.description}`;
+            if (prof.score) output += ` | Relevance: ${(prof.score * 100).toFixed(0)}%`;
+            output += '\n';
+          }
         }
 
-        if (resultCount === 0) {
-          formattedOutput = `No relevant memories found for this query (scope: ${scope}).`;
+        if (count === 0) {
+          output = `No relevant memories found (scope: ${scope}, method: ${methodUsed}).`;
         } else {
-          formattedOutput = `Found ${resultCount} relevant memories (scope: ${scope}):\n\n${formattedOutput}`;
+          output =
+            `Found ${count} memories (scope: ${scope}, method: ${methodUsed}${fallbackUsed ? ', fallback: yes' : ''}):\n\n` +
+            output;
         }
 
+        return { content: [{ type: 'text', text: output }] };
+      }
+
+      case 'add_developer_preference': {
+        const args = request.params.arguments as { preference: string } & WaitOptions;
+
+        const write = await addMemoryWithOptionalWait(
+          {
+            message_id: buildMessageId('pref'),
+            create_time: new Date().toISOString(),
+            sender: DEFAULT_USER_ID,
+            group_id: DEFAULT_GROUP_ID,
+            role: 'user',
+            content: `Developer preference: ${args.preference}`,
+            flush: true,
+          },
+          args
+        );
+
         return {
-          content: [{ type: 'text', text: formattedOutput }],
-        };
-      } catch (error: any) {
-        return {
-          content: [{ type: 'text', text: `Error searching memory: ${error.message}` }],
-          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: `Preference saved. request_id: ${write.result?.request_id || 'n/a'}, status: ${write.finalStatus}`,
+            },
+          ],
         };
       }
-    }
 
-    case 'add_developer_preference': {
-      const args = request.params.arguments as { preference: string };
-      try {
-        const result = await evermem.addMemory({
-          message_id: `pref_${SESSION_ID}_${PLATFORM}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-          create_time: new Date().toISOString(),
-          sender: DEFAULT_USER_ID,
-          group_id: DEFAULT_GROUP_ID,
-          role: 'user',
-          content: `My developer preference: ${args.preference}`,
-          flush: true
-        });
-        return {
-          content: [{ type: 'text', text: `Preference saved: "${args.preference}"` }],
-        };
-      } catch (error: any) {
-        return {
-          content: [{ type: 'text', text: `Error saving preference: ${error.message}` }],
-          isError: true,
-        };
-      }
-    }
-
-    case 'list_recent_memories': {
-      const args = request.params.arguments as {
-        memory_type?: string;
-        page?: number;
-        page_size?: number;
-      };
-      try {
+      case 'list_recent_memories': {
+        const args = request.params.arguments as { memory_type?: string; page?: number; page_size?: number };
         const result = await evermem.getMemories({
           user_id: DEFAULT_USER_ID,
           group_ids: [DEFAULT_GROUP_ID],
-          memory_type: (args.memory_type as any) || 'episodic_memory',
-          page: args.page || 1,
-          page_size: args.page_size || 10
+          memory_type: (args?.memory_type as any) || 'episodic_memory',
+          page: args?.page || 1,
+          page_size: args?.page_size || 10,
         });
 
-        let formattedOutput = "";
         const memories = result?.result?.memories || [];
         const totalCount = result?.result?.total_count || 0;
-
         if (memories.length === 0) {
-          formattedOutput = `No ${args.memory_type || 'episodic_memory'} memories found.`;
-        } else {
-          formattedOutput = `Showing ${memories.length} of ${totalCount} ${args.memory_type || 'episodic_memory'} memories:\n\n`;
-          memories.forEach((mem: any, index: number) => {
-            const num = ((args.page || 1) - 1) * (args.page_size || 10) + index + 1;
-            formattedOutput += `[${num}] ID: ${mem.id}\n`;
-            if (mem.summary) formattedOutput += `    Summary: ${mem.summary}\n`;
-            if (mem.atomic_fact) formattedOutput += `    Fact: ${mem.atomic_fact}\n`;
-            if (mem.foresight) formattedOutput += `    Plan: ${mem.foresight}\n`;
-            if (mem.profile_data) formattedOutput += `    Profile: ${JSON.stringify(mem.profile_data)}\n`;
-            if (mem.content) formattedOutput += `    Content: ${mem.content}\n`;
-            if (mem.timestamp || mem.created_at) formattedOutput += `    Time: ${mem.timestamp || mem.created_at}\n`;
-            formattedOutput += '\n';
-          });
+          return {
+            content: [{ type: 'text', text: `No ${(args?.memory_type as string) || 'episodic_memory'} memories found.` }],
+          };
         }
 
-        return {
-          content: [{ type: 'text', text: formattedOutput }],
-        };
-      } catch (error: any) {
-        return {
-          content: [{ type: 'text', text: `Error listing memories: ${error.message}` }],
-          isError: true,
-        };
-      }
-    }
+        let formatted = `Showing ${memories.length} of ${totalCount} ${(args?.memory_type as string) || 'episodic_memory'} memories:\n\n`;
+        memories.forEach((mem: any, index: number) => {
+          const num = ((args?.page || 1) - 1) * (args?.page_size || 10) + index + 1;
+          formatted += `[${num}] ID: ${mem.id}\n`;
+          if (mem.summary) formatted += `    Summary: ${mem.summary}\n`;
+          if (mem.atomic_fact) formatted += `    Fact: ${mem.atomic_fact}\n`;
+          if (mem.foresight) formatted += `    Plan: ${mem.foresight}\n`;
+          if (mem.profile_data) formatted += `    Profile: ${JSON.stringify(mem.profile_data)}\n`;
+          if (mem.content) formatted += `    Content: ${mem.content}\n`;
+          if (mem.timestamp || mem.created_at) formatted += `    Time: ${mem.timestamp || mem.created_at}\n`;
+          formatted += '\n';
+        });
 
-    case 'delete_memory': {
-      const args = request.params.arguments as {
-        memory_id?: string;
-        memory_type?: string;
-      };
-      try {
-        const result = await evermem.deleteMemories({
-          memory_id: args.memory_id,
+        return { content: [{ type: 'text', text: formatted }] };
+      }
+
+      case 'delete_memory': {
+        const args = request.params.arguments as { memory_id?: string; memory_type?: string; confirm?: boolean };
+        const memoryId = args?.memory_id;
+        const memoryType = args?.memory_type;
+        const bulk = isBulkDelete(memoryId);
+
+        if (!memoryId && !memoryType) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            'Provide memory_id for single delete, or memory_type with confirm=true for bulk delete.'
+          );
+        }
+
+        if (bulk && !memoryType) {
+          throw new McpError(ErrorCode.InvalidParams, 'Bulk delete requires memory_type.');
+        }
+
+        if (bulk && args?.confirm !== true) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            'Bulk delete requires confirm=true to prevent accidental mass deletion.'
+          );
+        }
+
+        const payload = {
+          memory_id: memoryId || '__all__',
           user_id: DEFAULT_USER_ID,
           group_id: DEFAULT_GROUP_ID,
-          memory_type: args.memory_type as any
-        });
-        return {
-          content: [{ type: 'text', text: `Memory deleted successfully. ${JSON.stringify(result)}` }],
+          memory_type: memoryType as any,
         };
-      } catch (error: any) {
+
+        const result = await evermem.deleteMemories(payload);
+        const mode = bulk ? `bulk ${memoryType}` : `single ${memoryId}`;
         return {
-          content: [{ type: 'text', text: `Error deleting memory: ${error.message}` }],
-          isError: true,
+          content: [{ type: 'text', text: `Delete success (${mode}). ${JSON.stringify(result)}` }],
         };
       }
-    }
 
-    case 'add_foresight_todo': {
-      const args = request.params.arguments as { content: string };
-      try {
-        const result = await evermem.addMemory({
-          message_id: `todo_${SESSION_ID}_${PLATFORM}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-          create_time: new Date().toISOString(),
-          sender: DEFAULT_USER_ID,
-          group_id: DEFAULT_GROUP_ID,
-          role: 'assistant',
-          content: `Future task / tech debt: ${args.content}`,
-          flush: true
-        });
+      case 'add_foresight_todo': {
+        const args = request.params.arguments as { content: string } & WaitOptions;
+
+        const write = await addMemoryWithOptionalWait(
+          {
+            message_id: buildMessageId('todo'),
+            create_time: new Date().toISOString(),
+            sender: DEFAULT_USER_ID,
+            group_id: DEFAULT_GROUP_ID,
+            role: 'assistant',
+            content: `Future task / tech debt: ${args.content}`,
+            flush: true,
+          },
+          args
+        );
+
         return {
-          content: [{ type: 'text', text: `Future task recorded: "${args.content}"` }],
-        };
-      } catch (error: any) {
-        return {
-          content: [{ type: 'text', text: `Error recording future task: ${error.message}` }],
-          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: `Future task saved. request_id: ${write.result?.request_id || 'n/a'}, status: ${write.finalStatus}`,
+            },
+          ],
         };
       }
-    }
 
-    default:
-      throw new McpError(
-        ErrorCode.MethodNotFound,
-        `Unknown tool: ${request.params.name}`
-      );
+      case 'get_conversation_meta': {
+        const args = request.params.arguments as { group_id?: string };
+        const result = await evermem.getConversationMeta({ group_id: args?.group_id || DEFAULT_GROUP_ID });
+        return {
+          content: [{ type: 'text', text: `Conversation metadata:\n${JSON.stringify(result, null, 2)}` }],
+        };
+      }
+
+      case 'update_conversation_meta': {
+        const args = request.params.arguments as {
+          group_id?: string;
+          description?: string;
+          tags?: string[];
+          default_timezone?: string;
+          scene_desc?: Record<string, unknown>;
+          user_details?: Record<string, unknown>;
+          llm_custom_setting?: Record<string, unknown>;
+        };
+
+        const payload = {
+          group_id: args?.group_id || DEFAULT_GROUP_ID,
+          description: args?.description,
+          tags: args?.tags,
+          default_timezone: args?.default_timezone,
+          scene_desc: args?.scene_desc,
+          user_details: args?.user_details as any,
+          llm_custom_setting: args?.llm_custom_setting as any,
+        };
+
+        const result = await evermem.updateConversationMeta(payload);
+        return {
+          content: [{ type: 'text', text: `Conversation metadata updated:\n${JSON.stringify(result, null, 2)}` }],
+        };
+      }
+
+      default:
+        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
+    }
+  } catch (error: any) {
+    logEvent('error', 'tool.error', {
+      tool: toolName,
+      duration_ms: Date.now() - toolStart,
+      message: error?.message || 'Unknown error',
+    });
+    const message = error instanceof McpError ? error.message : `Error in ${toolName}: ${error?.message || 'unknown'}`;
+    return {
+      content: [{ type: 'text', text: message }],
+      isError: true,
+    };
+  } finally {
+    logEvent('info', 'tool.done', {
+      tool: toolName,
+      duration_ms: Date.now() - toolStart,
+    });
   }
 });
 
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('CodeMem MCP server running on stdio');
+  logEvent('info', 'server.started', {
+    user_id: DEFAULT_USER_ID,
+    group_id: DEFAULT_GROUP_ID,
+    session_id: SESSION_ID,
+    platform: PLATFORM,
+    default_scope: DEFAULT_MEMORY_SCOPE,
+  });
 }
 
 main().catch((error) => {
-  console.error("Server error:", error);
+  console.error('Server error:', error);
   process.exit(1);
 });
