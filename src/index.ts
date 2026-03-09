@@ -98,6 +98,7 @@ function generateSessionID(): string {
 const DEFAULT_USER_ID = detectUserID();
 const DEFAULT_GROUP_ID = detectGroupID();
 const SESSION_ID = generateSessionID();
+const DEFAULT_MEMORY_SCOPE = process.env.MEMORY_SCOPE || 'repo'; // 'session' | 'repo' | 'all'
 
 const evermem = new EverMemClient(EVERMEM_API_KEY);
 
@@ -170,12 +171,14 @@ You have access to CodeMem, a persistent project memory system. Follow these rul
 - Call \`search_project_memory\` with a query related to the task at hand.
 - Check for existing architectural decisions, preferred patterns, or relevant past context.
 - Respect any developer preferences found in memory (coding style, libraries, conventions).
-- Note: Results may include memories from previous sessions — check timestamp and session ID in message_id if context seems stale.
+- Use scope parameter to control context: "session" (current session only), "repo" (all sessions in this project, default), "all" (across all projects).
+- Note: Results show session info in brackets — check if memory is from current session [current session] or a previous one [session: xxxxxx-xxxxxx].
 
 **Rules:**
 - Search silently — do NOT announce that you are searching memory, just do it.
 - If memory results conflict with the current request, mention the conflict to the user.
-- Use the "agentic" retrieve method for complex or multi-faceted queries.`;
+- Use the "agentic" retrieve method for complex or multi-faceted queries.
+- For most tasks, use "repo" scope to maintain project consistency. Use "session" scope only when you need fresh context from just this coding session.`;
 
   switch (name) {
     case 'codemem-auto':
@@ -252,6 +255,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               enum: ['hybrid', 'agentic', 'keyword', 'vector'],
               description: 'Retrieval strategy. "hybrid" (default) combines keyword + vector search. "agentic" uses LLM-guided multi-round retrieval for complex queries.',
+            },
+            scope: {
+              type: 'string',
+              enum: ['session', 'repo', 'all'],
+              description: 'Memory scope: "session" (current session only), "repo" (all sessions in current repo, default), "all" (across all repos/users).',
             },
           },
           required: ['query'],
@@ -358,24 +366,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'search_project_memory': {
-      const args = request.params.arguments as { query: string; retrieve_method?: string };
+      const args = request.params.arguments as { query: string; retrieve_method?: string; scope?: string };
       try {
+        const scope = args.scope || 'repo'; // Default to repo scope
+
         const result = await evermem.searchMemories({
           user_id: DEFAULT_USER_ID,
           group_ids: [DEFAULT_GROUP_ID],
           query: args.query,
           memory_types: ['episodic_memory', 'profile'],
           retrieve_method: (args.retrieve_method as any) || 'hybrid',
-          top_k: 10
+          top_k: 20 // Fetch more to filter by scope
         });
+
+        // Helper to extract session ID from message_id
+        const getSessionFromMessageId = (messageId: string): string | null => {
+          const match = messageId?.match?.(/^[^_]+_([^_]+)_/);
+          return match ? match[1] : null;
+        };
+
+        // Filter memories based on scope
+        let filteredMemories = result?.result?.memories || [];
+        if (scope === 'session') {
+          filteredMemories = filteredMemories.filter((mem: any) => {
+            const memSession = getSessionFromMessageId(mem.id); // Try to get from original_data
+            if (mem.original_data?.[0]?.data[0]?.extend?.message_id) {
+              const origSession = getSessionFromMessageId(mem.original_data[0].data[0].extend.message_id);
+              return origSession === SESSION_ID;
+            }
+            return false;
+          });
+        }
+        // For 'repo' scope, use all results as-is
 
         let formattedOutput = "";
         let resultCount = 0;
 
-        if (result?.result?.memories?.length > 0) {
-          result.result.memories.forEach((mem: any, index: number) => {
+        if (filteredMemories.length > 0) {
+          filteredMemories.slice(0, 10).forEach((mem: any, index: number) => {
             resultCount++;
-            formattedOutput += `[${index + 1}] Type: ${mem.memory_type}`;
+            // Extract session info if available
+            let sessionInfo = '';
+            if (mem.original_data?.[0]?.data[0]?.extend?.message_id) {
+              const msgId = mem.original_data[0].data[0].extend.message_id;
+              const memSession = getSessionFromMessageId(msgId);
+              sessionInfo = memSession === SESSION_ID ? ' [current session]' : ` [session: ${memSession}]`;
+            }
+
+            formattedOutput += `[${index + 1}] Type: ${mem.memory_type}${sessionInfo}`;
             if (mem.summary) formattedOutput += ` | Summary: ${mem.summary}`;
             if (mem.atomic_fact) formattedOutput += ` | Fact: ${mem.atomic_fact}`;
             if (mem.foresight) formattedOutput += ` | Plan: ${mem.foresight}`;
@@ -396,9 +434,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         if (resultCount === 0) {
-          formattedOutput = "No relevant memories found for this query.";
+          formattedOutput = `No relevant memories found for this query (scope: ${scope}).`;
         } else {
-          formattedOutput = `Found ${resultCount} relevant memories:\n\n${formattedOutput}`;
+          formattedOutput = `Found ${resultCount} relevant memories (scope: ${scope}):\n\n${formattedOutput}`;
         }
 
         return {
