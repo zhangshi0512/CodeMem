@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "mcp__plugin_claude-mem_mcp-search__search",
-      "mcp__plugin_claude-mem_mcp-search__save_memory"
+      "mcp__plugin_claude-mem_mcp-search__save_memory",
+      "Bash(claude mcp:*)",
+      "Bash(xargs grep:*)",
+      "Bash(npm run:*)",
+      "Bash(curl:*)"
     ]
   }
 }

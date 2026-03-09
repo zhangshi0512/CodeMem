@@ -9,6 +9,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import dotenv from 'dotenv';
+import { execSync } from 'child_process';
 import { EverMemClient } from './evermind-client.js';
 
 // Load environment variables
@@ -21,8 +22,82 @@ if (!EVERMEM_API_KEY) {
   process.exit(1);
 }
 
-const DEFAULT_USER_ID = process.env.USER_ID || 'codemem_user_1';
-const DEFAULT_GROUP_ID = process.env.GROUP_ID || 'codemem_workspace_1';
+// ─── Auto-Detection Functions ───────────────────────────────────────────────
+/**
+ * Detect GitHub username with fallback to local username
+ * Priority: GitHub token API → git config user.name → local username → env var
+ */
+function detectUserID(): string {
+  // 1. Try GitHub API with token (enterprise users)
+  const ghToken = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  if (ghToken) {
+    try {
+      const response = execSync(`gh api user.login`, { encoding: 'utf-8' }).trim();
+      if (response) return response;
+    } catch (e) {
+      // GitHub CLI not available or token invalid, continue to next method
+    }
+  }
+
+  // 2. Try git config user.name
+  try {
+    const gitUsername = execSync('git config user.name', { encoding: 'utf-8' }).trim();
+    if (gitUsername) return gitUsername;
+  } catch (e) {
+    // Not in git repo or git not available
+  }
+
+  // 3. Try git config user.email (extract username part)
+  try {
+    const gitEmail = execSync('git config user.email', { encoding: 'utf-8' }).trim();
+    const username = gitEmail.split('@')[0];
+    if (username) return username;
+  } catch (e) {
+    // Not in git repo or git not available
+  }
+
+  // 4. Fall back to system username
+  const systemUser = process.env.USER || process.env.USERNAME;
+  if (systemUser) return systemUser;
+
+  // 5. Final fallback: env var or default
+  return process.env.USER_ID || 'codemem_user';
+}
+
+/**
+ * Detect project/group name from git repo
+ * Priority: git repo root folder name → env var → default
+ */
+function detectGroupID(): string {
+  // 1. Try to get git repository root and use folder name
+  try {
+    const repoRoot = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8' }).trim();
+    const projectName = repoRoot.split(/[\\\/]/).pop();
+    if (projectName) return projectName;
+  } catch (e) {
+    // Not in git repo
+  }
+
+  // 2. Fall back to env var or default
+  return process.env.GROUP_ID || 'codemem_workspace';
+}
+
+/**
+ * Generate unique session ID that persists for this MCP server instance
+ * Format: YYYYMMDD-HHMMSS-randomstring
+ */
+function generateSessionID(): string {
+  const now = new Date();
+  const date = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const time = now.toTimeString().slice(0, 8).replace(/:/g, '');
+  const random = Math.random().toString(36).substring(2, 8);
+  return `${date}-${time}-${random}`;
+}
+
+// Auto-detect or use env var overrides
+const DEFAULT_USER_ID = detectUserID();
+const DEFAULT_GROUP_ID = detectGroupID();
+const SESSION_ID = generateSessionID();
 
 const evermem = new EverMemClient(EVERMEM_API_KEY);
 
@@ -70,6 +145,8 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 
 You have access to CodeMem, a persistent project memory system. Follow these rules automatically throughout this session:
 
+**Context:** CodeMem is configured for user "${DEFAULT_USER_ID}" in project "${DEFAULT_GROUP_ID}". This session has ID "${SESSION_ID}" for tracking memories across coding sessions.
+
 **After completing any coding task, silently save important context:**
 - If an architectural decision was made (e.g., chose a library, database, pattern, or approach), call \`save_project_decision\` with a concise summary of the decision and reasoning.
 - If you discovered or inferred a coding preference from the user (e.g., naming conventions, error handling style, framework preferences), call \`add_developer_preference\`.
@@ -80,16 +157,20 @@ You have access to CodeMem, a persistent project memory system. Follow these rul
 - Be concise — save the essence of the decision, not verbose explanations.
 - Do NOT save trivial or obvious information (e.g., "created a file called index.ts").
 - Do NOT duplicate — if you already saved something similar earlier in this session, skip it.
-- Save at natural task boundaries (after implementing a feature, fixing a bug, or making a design choice).`;
+- Save at natural task boundaries (after implementing a feature, fixing a bug, or making a design choice).
+- Memories are automatically tagged with this session ID to allow filtering by coding session if needed.`;
 
   const contextAwareInstructions = `## CodeMem Context-Aware Instructions
 
 You have access to CodeMem, a persistent project memory system. Follow these rules automatically throughout this session:
 
+**Context:** CodeMem is configured for user "${DEFAULT_USER_ID}" in project "${DEFAULT_GROUP_ID}". Current session ID is "${SESSION_ID}".
+
 **Before writing any significant new code, search for relevant context:**
 - Call \`search_project_memory\` with a query related to the task at hand.
 - Check for existing architectural decisions, preferred patterns, or relevant past context.
 - Respect any developer preferences found in memory (coding style, libraries, conventions).
+- Note: Results may include memories from previous sessions — check timestamp and session ID in message_id if context seems stale.
 
 **Rules:**
 - Search silently — do NOT announce that you are searching memory, just do it.
@@ -257,7 +338,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const args = request.params.arguments as { content: string };
       try {
         const result = await evermem.addMemory({
-          message_id: `msg_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+          message_id: `decision_${SESSION_ID}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
           create_time: new Date().toISOString(),
           sender: DEFAULT_USER_ID,
           role: 'assistant',
@@ -335,7 +416,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const args = request.params.arguments as { preference: string };
       try {
         const result = await evermem.addMemory({
-          message_id: `pref_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+          message_id: `pref_${SESSION_ID}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
           create_time: new Date().toISOString(),
           sender: DEFAULT_USER_ID,
           group_id: DEFAULT_GROUP_ID,
@@ -428,7 +509,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const args = request.params.arguments as { content: string };
       try {
         const result = await evermem.addMemory({
-          message_id: `todo_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+          message_id: `todo_${SESSION_ID}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
           create_time: new Date().toISOString(),
           sender: DEFAULT_USER_ID,
           group_id: DEFAULT_GROUP_ID,
