@@ -119,9 +119,32 @@ Any AI tool that supports MCP clients will work. Provide the launch command:
 
 ---
 
-## How to Use It
+## Auto-Save Mode (Prompts)
 
-Once connected, talk to your AI naturally. The AI knows what the tools do and when to use them.
+CodeMem includes **MCP Prompts** — reusable instruction templates that tell your AI to automatically save and retrieve memories without you having to ask.
+
+| Prompt | What it does |
+|:---|:---|
+| `codemem-auto` | AI automatically saves decisions, preferences, and TODOs at the end of each task. No manual "save" needed. |
+| `codemem-context` | AI automatically searches project memory before writing new code, ensuring consistency with past decisions. |
+| `codemem-full` | Both auto-save and context-aware combined. Full autopilot. |
+
+### How to activate a prompt
+
+**In Cursor:** Open the chat and type: *"Use the codemem-full prompt"* or select it from the prompt picker if available.
+
+**In Claude Code:** Prompts are automatically available. The AI can reference them when you start a coding session.
+
+**Tip:** For the best experience, start your coding session with:
+> "Use codemem-full mode for this session."
+
+The AI will then silently search memory before writing code and save new decisions afterward — zero manual effort.
+
+---
+
+## Manual Usage
+
+You can also use CodeMem manually by talking to your AI naturally:
 
 **Saving a decision:**
 > "We just decided to use Zustand for state management. Save that to project memory."

@@ -3,6 +3,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ErrorCode,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
@@ -32,10 +34,111 @@ const server = new Server(
   {
     capabilities: {
       tools: {},
+      prompts: {},
     },
   }
 );
 
+// ─── Prompts ───────────────────────────────────────────────────────────────────
+// MCP Prompts inject instructions into the IDE's LLM context.
+// The "auto-save" prompt tells the AI to automatically save decisions and TODOs
+// at the end of each coding task without requiring the user to ask.
+
+server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  return {
+    prompts: [
+      {
+        name: 'codemem-auto',
+        description: 'Auto-save mode: Instructs the AI to automatically save architectural decisions, coding preferences, and tech debt discovered during the coding session. No manual "save" commands needed.',
+      },
+      {
+        name: 'codemem-context',
+        description: 'Context-aware mode: Instructs the AI to search project memory before writing any new code, ensuring consistency with past decisions.',
+      },
+      {
+        name: 'codemem-full',
+        description: 'Full autopilot mode: Combines auto-save and context-aware modes. The AI automatically retrieves relevant memories before coding AND saves new decisions afterward.',
+      },
+    ],
+  };
+});
+
+server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+  const { name } = request.params;
+
+  const autoSaveInstructions = `## CodeMem Auto-Save Instructions
+
+You have access to CodeMem, a persistent project memory system. Follow these rules automatically throughout this session:
+
+**After completing any coding task, silently save important context:**
+- If an architectural decision was made (e.g., chose a library, database, pattern, or approach), call \`save_project_decision\` with a concise summary of the decision and reasoning.
+- If you discovered or inferred a coding preference from the user (e.g., naming conventions, error handling style, framework preferences), call \`add_developer_preference\`.
+- If there is unfinished work, tech debt, or a follow-up task identified, call \`add_foresight_todo\`.
+
+**Rules:**
+- Save silently — do NOT ask the user for permission to save. Just do it.
+- Be concise — save the essence of the decision, not verbose explanations.
+- Do NOT save trivial or obvious information (e.g., "created a file called index.ts").
+- Do NOT duplicate — if you already saved something similar earlier in this session, skip it.
+- Save at natural task boundaries (after implementing a feature, fixing a bug, or making a design choice).`;
+
+  const contextAwareInstructions = `## CodeMem Context-Aware Instructions
+
+You have access to CodeMem, a persistent project memory system. Follow these rules automatically throughout this session:
+
+**Before writing any significant new code, search for relevant context:**
+- Call \`search_project_memory\` with a query related to the task at hand.
+- Check for existing architectural decisions, preferred patterns, or relevant past context.
+- Respect any developer preferences found in memory (coding style, libraries, conventions).
+
+**Rules:**
+- Search silently — do NOT announce that you are searching memory, just do it.
+- If memory results conflict with the current request, mention the conflict to the user.
+- Use the "agentic" retrieve method for complex or multi-faceted queries.`;
+
+  switch (name) {
+    case 'codemem-auto':
+      return {
+        description: 'Auto-save mode for CodeMem',
+        messages: [
+          {
+            role: 'user' as const,
+            content: { type: 'text' as const, text: autoSaveInstructions },
+          },
+        ],
+      };
+
+    case 'codemem-context':
+      return {
+        description: 'Context-aware mode for CodeMem',
+        messages: [
+          {
+            role: 'user' as const,
+            content: { type: 'text' as const, text: contextAwareInstructions },
+          },
+        ],
+      };
+
+    case 'codemem-full':
+      return {
+        description: 'Full autopilot mode for CodeMem (auto-save + context-aware)',
+        messages: [
+          {
+            role: 'user' as const,
+            content: {
+              type: 'text' as const,
+              text: `${contextAwareInstructions}\n\n${autoSaveInstructions}`,
+            },
+          },
+        ],
+      };
+
+    default:
+      throw new McpError(ErrorCode.InvalidRequest, `Unknown prompt: ${name}`);
+  }
+});
+
+// ─── Tools ─────────────────────────────────────────────────────────────────────
 // Define the tools we expose to the IDE
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
