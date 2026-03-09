@@ -10,6 +10,7 @@ lerna-debug.log*
 .pnpm-debug.log*
 Developer_Log.txt
 Developer_Log_Claude.txt
+MCP_setup.txt
 
 # Environment Variables
 .env
