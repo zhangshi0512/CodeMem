@@ -94,11 +94,68 @@ function generateSessionID(): string {
   return `${date}-${time}-${random}`;
 }
 
+/**
+ * Detect which platform/IDE is running CodeMem
+ * Priority: explicit env var → IDE-specific env vars → parent process → default
+ */
+function detectPlatform(): string {
+  // 1. Explicit override
+  if (process.env.PLATFORM) {
+    return process.env.PLATFORM;
+  }
+
+  // 2. Check for IDE-specific environment variables
+  if (process.env.CURSOR_ENVIRONMENT) return 'cursor';
+  if (process.env.WINDSURF_HOME) return 'windsurf';
+  if (process.env.CODEIUM_WINDSURF) return 'windsurf';
+  if (process.env.CLAUDE_CODE) return 'claude-code';
+  if (process.env.CLAUDE_VERSION) return 'claude-code';
+
+  // 3. Check parent process name
+  try {
+    const { spawnSync } = require('child_process');
+    const result = spawnSync('ps', ['-p', process.ppid.toString(), '-o', 'comm='], { encoding: 'utf-8' });
+    const parentProcess = result.stdout?.trim().toLowerCase() || '';
+
+    if (parentProcess.includes('cursor')) return 'cursor';
+    if (parentProcess.includes('windsurf')) return 'windsurf';
+    if (parentProcess.includes('claude')) return 'claude-code';
+    if (parentProcess.includes('cline')) return 'cline';
+    if (parentProcess.includes('node')) {
+      // Running directly with node, check ARGV
+      if (process.argv.some(arg => arg.includes('claude'))) return 'claude-code';
+      if (process.argv.some(arg => arg.includes('cursor'))) return 'cursor';
+      if (process.argv.some(arg => arg.includes('windsurf'))) return 'windsurf';
+    }
+  } catch (e) {
+    // ps command not available (Windows), continue to next detection
+  }
+
+  // 4. Windows-specific detection (using wmic or tasklist)
+  if (process.platform === 'win32') {
+    try {
+      const { execSync } = require('child_process');
+      const parent = execSync(`wmic process where processid=${process.ppid} get name`, { encoding: 'utf-8' });
+      const parentName = parent.split('\n')[1]?.trim().toLowerCase() || '';
+
+      if (parentName.includes('cursor')) return 'cursor';
+      if (parentName.includes('windsurf')) return 'windsurf';
+      if (parentName.includes('claude')) return 'claude-code';
+    } catch (e) {
+      // wmic not available
+    }
+  }
+
+  // 5. Default fallback
+  return 'unknown';
+}
+
 // Auto-detect or use env var overrides
 const DEFAULT_USER_ID = detectUserID();
 const DEFAULT_GROUP_ID = detectGroupID();
 const SESSION_ID = generateSessionID();
 const DEFAULT_MEMORY_SCOPE = process.env.MEMORY_SCOPE || 'repo'; // 'session' | 'repo' | 'all'
+const PLATFORM = detectPlatform(); // 'claude-code' | 'cursor' | 'windsurf' | 'cline' | 'unknown'
 
 const evermem = new EverMemClient(EVERMEM_API_KEY);
 
@@ -146,7 +203,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 
 You have access to CodeMem, a persistent project memory system. Follow these rules automatically throughout this session:
 
-**Context:** CodeMem is configured for user "${DEFAULT_USER_ID}" in project "${DEFAULT_GROUP_ID}". This session has ID "${SESSION_ID}" for tracking memories across coding sessions.
+**Context:** CodeMem is configured for user "${DEFAULT_USER_ID}" in project "${DEFAULT_GROUP_ID}". This session has ID "${SESSION_ID}" for tracking memories across coding sessions. Platform: "${PLATFORM}".
 
 **After completing any coding task, silently save important context:**
 - If an architectural decision was made (e.g., chose a library, database, pattern, or approach), call \`save_project_decision\` with a concise summary of the decision and reasoning.
@@ -165,7 +222,7 @@ You have access to CodeMem, a persistent project memory system. Follow these rul
 
 You have access to CodeMem, a persistent project memory system. Follow these rules automatically throughout this session:
 
-**Context:** CodeMem is configured for user "${DEFAULT_USER_ID}" in project "${DEFAULT_GROUP_ID}". Current session ID is "${SESSION_ID}".
+**Context:** CodeMem is configured for user "${DEFAULT_USER_ID}" in project "${DEFAULT_GROUP_ID}". Current session ID is "${SESSION_ID}". Platform: "${PLATFORM}".
 
 **Before writing any significant new code, search for relevant context:**
 - Call \`search_project_memory\` with a query related to the task at hand.
@@ -178,7 +235,8 @@ You have access to CodeMem, a persistent project memory system. Follow these rul
 - Search silently — do NOT announce that you are searching memory, just do it.
 - If memory results conflict with the current request, mention the conflict to the user.
 - Use the "agentic" retrieve method for complex or multi-faceted queries.
-- For most tasks, use "repo" scope to maintain project consistency. Use "session" scope only when you need fresh context from just this coding session.`;
+- For most tasks, use "repo" scope to maintain project consistency. Use "session" scope only when you need fresh context from just this coding session.
+- Note: Search results show platform info (e.g., [current via claude-code], [session-xxx via cursor]) to help you understand which tool created each memory.`;
 
   switch (name) {
     case 'codemem-auto':
@@ -346,7 +404,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const args = request.params.arguments as { content: string };
       try {
         const result = await evermem.addMemory({
-          message_id: `decision_${SESSION_ID}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+          message_id: `decision_${SESSION_ID}_${PLATFORM}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
           create_time: new Date().toISOString(),
           sender: DEFAULT_USER_ID,
           role: 'assistant',
@@ -379,9 +437,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           top_k: 20 // Fetch more to filter by scope
         });
 
-        // Helper to extract session ID from message_id
+        // Helper functions to extract metadata from message_id
         const getSessionFromMessageId = (messageId: string): string | null => {
           const match = messageId?.match?.(/^[^_]+_([^_]+)_/);
+          return match ? match[1] : null;
+        };
+
+        const getPlatformFromMessageId = (messageId: string): string | null => {
+          const match = messageId?.match?.(/^[^_]+_[^_]+_([^_]+)_/);
           return match ? match[1] : null;
         };
 
@@ -405,15 +468,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (filteredMemories.length > 0) {
           filteredMemories.slice(0, 10).forEach((mem: any, index: number) => {
             resultCount++;
-            // Extract session info if available
-            let sessionInfo = '';
+            // Extract session and platform info if available
+            let contextInfo = '';
             if (mem.original_data?.[0]?.data[0]?.extend?.message_id) {
               const msgId = mem.original_data[0].data[0].extend.message_id;
               const memSession = getSessionFromMessageId(msgId);
-              sessionInfo = memSession === SESSION_ID ? ' [current session]' : ` [session: ${memSession}]`;
+              const memPlatform = getPlatformFromMessageId(msgId);
+
+              const sessionLabel = memSession === SESSION_ID ? 'current' : memSession;
+              const platformLabel = memPlatform ? ` via ${memPlatform}` : '';
+              contextInfo = ` [${sessionLabel}${platformLabel}]`;
             }
 
-            formattedOutput += `[${index + 1}] Type: ${mem.memory_type}${sessionInfo}`;
+            formattedOutput += `[${index + 1}] Type: ${mem.memory_type}${contextInfo}`;
             if (mem.summary) formattedOutput += ` | Summary: ${mem.summary}`;
             if (mem.atomic_fact) formattedOutput += ` | Fact: ${mem.atomic_fact}`;
             if (mem.foresight) formattedOutput += ` | Plan: ${mem.foresight}`;
@@ -454,7 +521,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const args = request.params.arguments as { preference: string };
       try {
         const result = await evermem.addMemory({
-          message_id: `pref_${SESSION_ID}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+          message_id: `pref_${SESSION_ID}_${PLATFORM}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
           create_time: new Date().toISOString(),
           sender: DEFAULT_USER_ID,
           group_id: DEFAULT_GROUP_ID,
@@ -547,7 +614,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const args = request.params.arguments as { content: string };
       try {
         const result = await evermem.addMemory({
-          message_id: `todo_${SESSION_ID}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+          message_id: `todo_${SESSION_ID}_${PLATFORM}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
           create_time: new Date().toISOString(),
           sender: DEFAULT_USER_ID,
           group_id: DEFAULT_GROUP_ID,

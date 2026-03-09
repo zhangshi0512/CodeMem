@@ -53,11 +53,29 @@ CodeMem detects your project automatically:
 1. **Git Repository** — Uses the folder name of your git repo root (e.g., "CodeMem")
 2. **Override** — Set `GROUP_ID` env var to manually specify
 
+### Platform Detection (Automatic)
+CodeMem detects which IDE/tool is using it:
+1. **Explicit Override** — Set `PLATFORM` env var (e.g., `PLATFORM=cursor`)
+2. **IDE Environment Detection** — Checks for IDE-specific env vars:
+   - `CURSOR_ENVIRONMENT` → Cursor
+   - `WINDSURF_HOME` / `CODEIUM_WINDSURF` → Windsurf
+   - `CLAUDE_VERSION` → Claude Code
+3. **Parent Process Detection** — Inspects parent process name (macOS/Linux)
+4. **Windows Detection** — Uses `wmic` to identify parent process (Windows)
+5. **Fallback** — Defaults to "unknown" if detection fails
+
+**Supported Platforms:**
+- `claude-code` — Claude Code (CLI)
+- `cursor` — Cursor
+- `windsurf` — Windsurf
+- `cline` — Cline
+- `unknown` — Unrecognized IDE or explicit override
+
 ### Session ID (Per-Invocation)
 Each time CodeMem starts, it generates a unique session ID:
 - **Format:** `YYYYMMDD-HHMMSS-randomstring` (e.g., `20260309-143022-abc123`)
-- **Purpose:** Tracks which memories belong to which coding session
-- **Shown in Results:** Memories display `[current session]` or `[session: xxxxxx]` labels
+- **Purpose:** Tracks which memories belong to which coding session AND which platform created them
+- **Shown in Results:** Memories display `[current via claude-code]` or `[session-xxx via cursor]` labels
 - **Cannot Override:** Ensures session isolation and context accuracy
 
 **Example Auto-Detection Output:**
@@ -65,6 +83,7 @@ Each time CodeMem starts, it generates a unique session ID:
 👤 USER: Simon Zhang (from git config user.name)
 📁 PROJECT: CodeMem (from repo folder name)
 🔐 SESSION: 20260309-143022-abc123 (auto-generated this invocation)
+🖥️  PLATFORM: claude-code (auto-detected from environment)
 ```
 
 ---
@@ -143,6 +162,10 @@ GROUP_ID=project_name
 # GitHub token for enterprise users (reads GH username from API)
 GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
+# Platform/IDE identification - auto-detected from environment or parent process
+# Options: claude-code | cursor | windsurf | cline | unknown
+PLATFORM=cursor
+
 # Default memory retrieval scope: 'session' | 'repo' | 'all' (default: 'repo')
 MEMORY_SCOPE=repo
 ```
@@ -150,6 +173,7 @@ MEMORY_SCOPE=repo
 **Auto-Detection Priority:**
 - `USER_ID`: GitHub token API → git config user.name → system username → env var
 - `GROUP_ID`: git repository folder name → env var
+- `PLATFORM`: Explicit env var → IDE-specific env vars → parent process name → wmic (Windows) → "unknown"
 - `SESSION_ID`: Auto-generated unique ID per MCP invocation (cannot be overridden)
 
 ---
@@ -207,11 +231,10 @@ Claude Code has native MCP support. Add CodeMem with environment variables:
 
 ```bash
 claude mcp add codemem node /absolute/path/to/CodeMem/dist/index.js \
-  -e EVERMEM_API_KEY=your_api_key_here \
-  -e MEMORY_SCOPE=repo
+  -e EVERMEM_API_KEY=your_api_key_here
 ```
 
-**Optional environment variables:**
+**With optional environment variables:**
 ```bash
 claude mcp add codemem node /absolute/path/to/CodeMem/dist/index.js \
   -e EVERMEM_API_KEY=your_api_key_here \
@@ -219,15 +242,24 @@ claude mcp add codemem node /absolute/path/to/CodeMem/dist/index.js \
   -e MEMORY_SCOPE=repo
 ```
 
-CodeMem will automatically detect `USER_ID` and `GROUP_ID` from your git config and repository name. You only need to set them explicitly to override the defaults:
-
+**Full configuration (if overriding auto-detected values):**
 ```bash
 claude mcp add codemem node /absolute/path/to/CodeMem/dist/index.js \
   -e EVERMEM_API_KEY=your_api_key_here \
   -e USER_ID=custom_user \
   -e GROUP_ID=custom_project \
+  -e PLATFORM=claude-code \
   -e MEMORY_SCOPE=repo
 ```
+
+**Auto-Detection:**
+CodeMem will automatically detect:
+- `USER_ID` from GitHub config or system username
+- `GROUP_ID` from git repository folder name
+- `PLATFORM` from environment variables or parent process (detects "claude-code" automatically)
+- `SESSION_ID` generates a unique ID for this invocation
+
+You only need to set these explicitly if you want to override the auto-detected values.
 
 ### Other MCP-Compatible Tools (Cline, Roo Code, Antigravity, etc.)
 
@@ -273,12 +305,18 @@ You can also use CodeMem manually by talking to your AI naturally:
 
 **Searching context (default repo scope):**
 > "What database did we decide to use for this project?"
+>
+> Result: Shows all database decisions, including which platform/IDE created each one (e.g., [current via claude-code], [session-xxx via cursor])
 
 **Searching within current session:**
 > "Search memory for decisions made in this session only."
+>
+> Result: Returns only memories from this coding session
 
 **Searching across all knowledge:**
 > "Search all project memories for authentication patterns we've used."
+>
+> Result: Shows all authentication patterns created across all sessions and platforms
 
 **Browsing all memories:**
 > "List all the project decisions we've saved so far."
