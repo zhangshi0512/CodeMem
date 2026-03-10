@@ -3,7 +3,11 @@ import test from 'node:test';
 import {
   buildSearchFilters,
   chooseRetrieveMethod,
+  estimateTokenCount,
+  getMessageIdFromMemory,
+  getPlatformFromMemory,
   getPlatformFromMessageId,
+  getSessionFromMemory,
   getSessionFromMessageId,
   isBulkDelete,
   normalizeScope,
@@ -37,4 +41,23 @@ test('bulk delete detection is safe-by-default', () => {
   assert.equal(isBulkDelete(undefined), true);
   assert.equal(isBulkDelete('__all__'), true);
   assert.equal(isBulkDelete('507f1f77bcf86cd799439011'), false);
+});
+
+test('memory metadata extraction works for nested original_data and fallback ids', () => {
+  const nested = {
+    original_data: [{ data: [{ extend: { message_id: 'decision_20260309-143022-abc123_cursor_12345_abc' } }] }],
+  };
+  assert.equal(getMessageIdFromMemory(nested), 'decision_20260309-143022-abc123_cursor_12345_abc');
+  assert.equal(getSessionFromMemory(nested), '20260309-143022-abc123');
+  assert.equal(getPlatformFromMemory(nested), 'cursor');
+
+  const fallback = { id: 'pref_20260309-143022-abc123_claude-code_12345_abc' };
+  assert.equal(getSessionFromMemory(fallback), '20260309-143022-abc123');
+  assert.equal(getPlatformFromMemory(fallback), 'claude-code');
+});
+
+test('token estimate uses compact character heuristic', () => {
+  assert.equal(estimateTokenCount(['abcd']), 1);
+  assert.equal(estimateTokenCount(['abcdefgh']), 2);
+  assert.equal(estimateTokenCount([undefined, 'abcdefghij']), 3);
 });

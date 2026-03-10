@@ -6,6 +6,24 @@ export interface SearchFilters {
   group_ids?: string[];
 }
 
+export interface SearchMemoryRecord {
+  id?: string;
+  memory_type?: string;
+  score?: number;
+  summary?: string;
+  atomic_fact?: string;
+  foresight?: string;
+  content?: string;
+  timestamp?: string;
+  original_data?: Array<{
+    data?: Array<{
+      extend?: {
+        message_id?: string;
+      };
+    }>;
+  }>;
+}
+
 export function normalizeScope(scope: string | undefined, defaultScope: string | undefined): MemoryScope {
   const raw = (scope || defaultScope || 'repo').toLowerCase();
   if (raw === 'session' || raw === 'repo' || raw === 'all') return raw;
@@ -46,7 +64,29 @@ export function getPlatformFromMessageId(messageId?: string): string | null {
   return match ? match[1] : null;
 }
 
+export function getMessageIdFromMemory(mem: SearchMemoryRecord): string | null {
+  const fromOriginal = mem.original_data?.[0]?.data?.[0]?.extend?.message_id;
+  if (fromOriginal) return fromOriginal;
+
+  if (mem.id && mem.id.includes('_')) return mem.id;
+  return null;
+}
+
+export function getSessionFromMemory(mem: SearchMemoryRecord): string | null {
+  const messageId = getMessageIdFromMemory(mem);
+  return getSessionFromMessageId(messageId || undefined);
+}
+
+export function getPlatformFromMemory(mem: SearchMemoryRecord): string | null {
+  const messageId = getMessageIdFromMemory(mem);
+  return getPlatformFromMessageId(messageId || undefined);
+}
+
+export function estimateTokenCount(parts: Array<string | undefined>): number {
+  const text = parts.filter(Boolean).join(' ');
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
 export function isBulkDelete(memoryId?: string): boolean {
   return !memoryId || memoryId === '__all__';
 }
-

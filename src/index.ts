@@ -14,11 +14,15 @@ import { AddMemoryRequest, EverMemClient } from './evermind-client.js';
 import {
   buildSearchFilters,
   chooseRetrieveMethod,
-  getPlatformFromMessageId,
-  getSessionFromMessageId,
+  estimateTokenCount,
+  getPlatformFromMemory,
+  getSessionFromMemory,
   isBulkDelete,
   normalizeScope,
+  SearchMemoryRecord,
 } from './policies.js';
+import { sanitizeForMemoryWrite } from './privacy.js';
+import { createWriteDedupeRegistry } from './dedupe.js';
 
 dotenv.config();
 
@@ -140,13 +144,26 @@ const DEFAULT_USER_ID = detectUserID();
 const DEFAULT_GROUP_ID = detectGroupID();
 const SESSION_ID = generateSessionID();
 const DEFAULT_MEMORY_SCOPE = normalizeScope(undefined, process.env.MEMORY_SCOPE || 'repo');
+const DEDUPE_WINDOW_MS = Math.max(10, Number(process.env.DEDUPE_WINDOW_SECONDS || '120')) * 1000;
 const PLATFORM = detectPlatform();
 const evermem = new EverMemClient(EVERMEM_API_KEY);
+const writeDedupe = createWriteDedupeRegistry(DEDUPE_WINDOW_MS);
 
 type WaitOptions = {
   wait_for_completion?: boolean;
   timeout_seconds?: number;
   poll_interval_ms?: number;
+};
+
+type MemoryListRecord = {
+  id?: string;
+  summary?: string;
+  atomic_fact?: string;
+  foresight?: string;
+  profile_data?: unknown;
+  content?: string;
+  timestamp?: string;
+  created_at?: string;
 };
 
 async function waitForRequestCompletion(
@@ -196,6 +213,31 @@ async function addMemoryWithOptionalWait(payload: AddMemoryRequest, options: Wai
     duration_ms: Date.now() - start,
   });
   return { result, finalStatus: 'queued' };
+}
+
+async function listMemoriesWindow(
+  memoryType: 'episodic_memory' | 'event_log' | 'profile' | 'foresight',
+  maxPages: number = 10,
+  pageSize: number = 50
+): Promise<MemoryListRecord[]> {
+  const all: MemoryListRecord[] = [];
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const result = await evermem.getMemories({
+      user_id: DEFAULT_USER_ID,
+      group_ids: [DEFAULT_GROUP_ID],
+      memory_type: memoryType,
+      page,
+      page_size: pageSize,
+    });
+
+    const memories = (result?.result?.memories || []) as MemoryListRecord[];
+    all.push(...memories);
+
+    if (memories.length < pageSize) break;
+  }
+
+  return all;
 }
 
 const server = new Server(
@@ -328,6 +370,74 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'search_project_memory_index',
+        description:
+          'Step 1 (compact index): return lightweight results with IDs, relevance, and estimated read cost.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Search query.' },
+            retrieve_method: {
+              type: 'string',
+              enum: ['hybrid', 'agentic', 'keyword', 'vector'],
+              description: 'Optional explicit retrieval method. If omitted, CodeMem chooses automatically.',
+            },
+            scope: {
+              type: 'string',
+              enum: ['session', 'repo', 'all'],
+              description: 'session=current session, repo=current project, all=all projects for current user.',
+            },
+            limit: {
+              type: 'number',
+              description: 'Max index rows to return (1-20, default 10).',
+            },
+          },
+          required: ['query'],
+        },
+      },
+      {
+        name: 'get_memory_timeline',
+        description:
+          'Step 2 (timeline): show chronological context around one memory ID from recent memories.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            anchor_memory_id: { type: 'string', description: 'Target memory ID to center timeline around.' },
+            memory_type: {
+              type: 'string',
+              enum: ['episodic_memory', 'event_log', 'profile', 'foresight'],
+              description: 'Memory type to search for anchor and timeline context.',
+            },
+            before: { type: 'number', description: 'Items before anchor in timeline (default 3).' },
+            after: { type: 'number', description: 'Items after anchor in timeline (default 3).' },
+            max_pages: { type: 'number', description: 'Max pages to scan for context (default 10).' },
+          },
+          required: ['anchor_memory_id'],
+        },
+      },
+      {
+        name: 'get_memory_details',
+        description:
+          'Step 3 (details): fetch full memory records by ID from paginated storage for deep reading.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            memory_ids: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'IDs of memories to fetch.',
+            },
+            memory_type: {
+              type: 'string',
+              enum: ['episodic_memory', 'event_log', 'profile', 'foresight'],
+              description: 'Memory type to scan (defaults to episodic_memory).',
+            },
+            max_pages: { type: 'number', description: 'Max pages to scan for IDs (default 20).' },
+          },
+          required: ['memory_ids'],
+        },
+      },
+      {
         name: 'add_developer_preference',
         description: 'Save a developer preference as profile memory.',
         inputSchema: {
@@ -452,6 +562,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (toolName) {
       case 'save_project_decision': {
         const args = request.params.arguments as { content: string } & WaitOptions;
+        const sanitized = sanitizeForMemoryWrite(args.content);
+        if (!sanitized) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Decision not saved because all content was marked private.',
+              },
+            ],
+          };
+        }
+        if (writeDedupe.isDuplicate('save_project_decision', sanitized)) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Decision deduped: same content was already saved recently in this session window.',
+              },
+            ],
+          };
+        }
 
         const episodicPayload: AddMemoryRequest = {
           message_id: buildMessageId('decisionepi'),
@@ -459,7 +590,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sender: DEFAULT_USER_ID,
           role: 'assistant',
           group_id: DEFAULT_GROUP_ID,
-          content: `Architectural decision and rationale: ${args.content}`,
+          content: `Architectural decision and rationale: ${sanitized}`,
           flush: true,
         };
 
@@ -469,7 +600,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sender: DEFAULT_USER_ID,
           role: 'assistant',
           group_id: DEFAULT_GROUP_ID,
-          content: `Atomic engineering fact: ${args.content}`,
+          content: `Atomic engineering fact: ${sanitized}`,
           flush: true,
         };
 
@@ -528,9 +659,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let filteredMemories = result?.result?.memories || [];
         if (scope === 'session') {
           filteredMemories = filteredMemories.filter((mem: any) => {
-            const messageId = mem.original_data?.[0]?.data?.[0]?.extend?.message_id as string | undefined;
-            const session = getSessionFromMessageId(messageId || mem.id);
-            return session === SESSION_ID;
+            const session = getSessionFromMemory(mem as SearchMemoryRecord);
+            return session === SESSION_ID || session === null;
           });
         }
 
@@ -538,9 +668,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let count = 0;
         for (const [idx, mem] of filteredMemories.slice(0, 10).entries()) {
           count += 1;
-          const messageId = mem.original_data?.[0]?.data?.[0]?.extend?.message_id as string | undefined;
-          const memSession = getSessionFromMessageId(messageId || mem.id);
-          const memPlatform = getPlatformFromMessageId(messageId || mem.id);
+          const memSession = getSessionFromMemory(mem as SearchMemoryRecord);
+          const memPlatform = getPlatformFromMemory(mem as SearchMemoryRecord);
           const sessionLabel = memSession ? (memSession === SESSION_ID ? 'current' : memSession) : 'unknown-session';
           const platformLabel = memPlatform ? ` via ${memPlatform}` : '';
 
@@ -575,8 +704,209 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: output }] };
       }
 
+      case 'search_project_memory_index': {
+        const args = request.params.arguments as {
+          query: string;
+          retrieve_method?: string;
+          scope?: string;
+          limit?: number;
+        };
+        const scope = normalizeScope(args.scope, DEFAULT_MEMORY_SCOPE);
+        const searchFilters = buildSearchFilters(scope, DEFAULT_USER_ID, DEFAULT_GROUP_ID);
+        const selectedMethod = chooseRetrieveMethod(args.query, args.retrieve_method);
+        const limit = Math.min(20, Math.max(1, Math.floor(args.limit || 10)));
+
+        let result: any;
+        let methodUsed = selectedMethod;
+        let fallbackUsed = false;
+
+        try {
+          result = await evermem.searchMemories({
+            ...searchFilters,
+            query: args.query,
+            memory_types: ['episodic_memory', 'profile'],
+            retrieve_method: selectedMethod,
+            top_k: 30,
+          });
+        } catch (error) {
+          if (selectedMethod === 'agentic') {
+            fallbackUsed = true;
+            methodUsed = 'hybrid';
+            result = await evermem.searchMemories({
+              ...searchFilters,
+              query: args.query,
+              memory_types: ['episodic_memory', 'profile'],
+              retrieve_method: 'hybrid',
+              top_k: 30,
+            });
+          } else {
+            throw error;
+          }
+        }
+
+        let memories = (result?.result?.memories || []) as SearchMemoryRecord[];
+        if (scope === 'session') {
+          memories = memories.filter((mem) => {
+            const session = getSessionFromMemory(mem);
+            return session === SESSION_ID || session === null;
+          });
+        }
+
+        const rows = memories.slice(0, limit).map((mem, idx) => {
+          const session = getSessionFromMemory(mem);
+          const platform = getPlatformFromMemory(mem);
+          const sessionLabel = session ? (session === SESSION_ID ? 'current' : session) : 'unknown-session';
+          const platformLabel = platform ? ` via ${platform}` : '';
+          const brief = mem.summary || mem.atomic_fact || mem.content || '(no summary)';
+          const compact = brief.length > 140 ? `${brief.slice(0, 137)}...` : brief;
+          const cost = estimateTokenCount([brief]);
+          const relevance = mem.score ? `${(mem.score * 100).toFixed(0)}%` : 'n/a';
+          return `[${idx + 1}] id=${mem.id || 'n/a'} | ${mem.memory_type || 'unknown'} | ${relevance} | ~${cost} tokens | [${sessionLabel}${platformLabel}] | ${compact}`;
+        });
+
+        const total = rows.length;
+        const estimatedReadTokens = memories.slice(0, limit).reduce((acc, mem) => {
+          return acc + estimateTokenCount([mem.summary, mem.atomic_fact, mem.content]);
+        }, 0);
+
+        const text =
+          total === 0
+            ? `No relevant memories found (scope: ${scope}, method: ${methodUsed}).`
+            : `Index results: ${total} (scope: ${scope}, method: ${methodUsed}${fallbackUsed ? ', fallback: yes' : ''}, est_read_tokens: ~${estimatedReadTokens})\n\n${rows.join('\n')}`;
+
+        return { content: [{ type: 'text', text }] };
+      }
+
+      case 'get_memory_timeline': {
+        const args = request.params.arguments as {
+          anchor_memory_id: string;
+          memory_type?: 'episodic_memory' | 'event_log' | 'profile' | 'foresight';
+          before?: number;
+          after?: number;
+          max_pages?: number;
+        };
+
+        const memoryType = args.memory_type || 'episodic_memory';
+        const before = Math.min(10, Math.max(0, Math.floor(args.before || 3)));
+        const after = Math.min(10, Math.max(0, Math.floor(args.after || 3)));
+        const maxPages = Math.min(30, Math.max(1, Math.floor(args.max_pages || 10)));
+
+        const memories = await listMemoriesWindow(memoryType, maxPages, 50);
+        const withTime = memories
+          .filter((mem) => (mem.timestamp || mem.created_at))
+          .sort((a, b) => {
+            const ta = new Date(a.timestamp || a.created_at || 0).getTime();
+            const tb = new Date(b.timestamp || b.created_at || 0).getTime();
+            return ta - tb;
+          });
+
+        const anchorIdx = withTime.findIndex((mem) => mem.id === args.anchor_memory_id);
+        if (anchorIdx < 0) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Anchor memory not found in scanned window (memory_type: ${memoryType}, max_pages: ${maxPages}).`,
+              },
+            ],
+          };
+        }
+
+        const start = Math.max(0, anchorIdx - before);
+        const end = Math.min(withTime.length - 1, anchorIdx + after);
+        const timeline = withTime.slice(start, end + 1);
+        const formatted = timeline
+          .map((mem) => {
+            const marker = mem.id === args.anchor_memory_id ? '*' : ' ';
+            const ts = mem.timestamp || mem.created_at || 'unknown-time';
+            const label = mem.summary || mem.atomic_fact || mem.foresight || mem.content || '(no content)';
+            const compact = label.length > 160 ? `${label.slice(0, 157)}...` : label;
+            return `${marker} ${ts} | id=${mem.id || 'n/a'} | ${compact}`;
+          })
+          .join('\n');
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Timeline around ${args.anchor_memory_id} (* = anchor)\n\n${formatted}`,
+            },
+          ],
+        };
+      }
+
+      case 'get_memory_details': {
+        const args = request.params.arguments as {
+          memory_ids: string[];
+          memory_type?: 'episodic_memory' | 'event_log' | 'profile' | 'foresight';
+          max_pages?: number;
+        };
+
+        const targetIds = new Set((args.memory_ids || []).filter(Boolean));
+        if (targetIds.size === 0) {
+          throw new McpError(ErrorCode.InvalidParams, 'memory_ids must contain at least one ID.');
+        }
+
+        const memoryType = args.memory_type || 'episodic_memory';
+        const maxPages = Math.min(40, Math.max(1, Math.floor(args.max_pages || 20)));
+        const memories = await listMemoriesWindow(memoryType, maxPages, 50);
+
+        const found = memories.filter((mem) => mem.id && targetIds.has(mem.id));
+        const foundIds = new Set(found.map((mem) => mem.id as string));
+        const missing = Array.from(targetIds).filter((id) => !foundIds.has(id));
+
+        const body = found
+          .map((mem, index) => {
+            return [
+              `[${index + 1}] ID: ${mem.id}`,
+              mem.summary ? `Summary: ${mem.summary}` : '',
+              mem.atomic_fact ? `Fact: ${mem.atomic_fact}` : '',
+              mem.foresight ? `Plan: ${mem.foresight}` : '',
+              mem.profile_data ? `Profile: ${JSON.stringify(mem.profile_data)}` : '',
+              mem.content ? `Content: ${mem.content}` : '',
+              mem.timestamp || mem.created_at ? `Time: ${mem.timestamp || mem.created_at}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n');
+          })
+          .join('\n\n');
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `Found ${found.length}/${targetIds.size} requested memories (memory_type: ${memoryType}, max_pages: ${maxPages}).` +
+                (missing.length > 0 ? ` Missing: ${missing.join(', ')}` : '') +
+                (body ? `\n\n${body}` : ''),
+            },
+          ],
+        };
+      }
+
       case 'add_developer_preference': {
         const args = request.params.arguments as { preference: string } & WaitOptions;
+        const sanitized = sanitizeForMemoryWrite(args.preference);
+        if (!sanitized) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Preference not saved because all content was marked private.',
+              },
+            ],
+          };
+        }
+        if (writeDedupe.isDuplicate('add_developer_preference', sanitized)) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Preference deduped: same content was already saved recently in this session window.',
+              },
+            ],
+          };
+        }
 
         const write = await addMemoryWithOptionalWait(
           {
@@ -585,7 +915,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             sender: DEFAULT_USER_ID,
             group_id: DEFAULT_GROUP_ID,
             role: 'user',
-            content: `Developer preference: ${args.preference}`,
+            content: `Developer preference: ${sanitized}`,
             flush: true,
           },
           args
@@ -675,6 +1005,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'add_foresight_todo': {
         const args = request.params.arguments as { content: string } & WaitOptions;
+        const sanitized = sanitizeForMemoryWrite(args.content);
+        if (!sanitized) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Future task not saved because all content was marked private.',
+              },
+            ],
+          };
+        }
+        if (writeDedupe.isDuplicate('add_foresight_todo', sanitized)) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Future task deduped: same content was already saved recently in this session window.',
+              },
+            ],
+          };
+        }
 
         const write = await addMemoryWithOptionalWait(
           {
@@ -683,7 +1034,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             sender: DEFAULT_USER_ID,
             group_id: DEFAULT_GROUP_ID,
             role: 'assistant',
-            content: `Future task / tech debt: ${args.content}`,
+            content: `Future task / tech debt: ${sanitized}`,
             flush: true,
           },
           args
@@ -765,6 +1116,7 @@ async function main() {
     session_id: SESSION_ID,
     platform: PLATFORM,
     default_scope: DEFAULT_MEMORY_SCOPE,
+    dedupe_window_seconds: DEDUPE_WINDOW_MS / 1000,
   });
 }
 

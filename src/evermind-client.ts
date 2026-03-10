@@ -140,7 +140,7 @@ export class EverMemClient {
       const response = await this.client.request({
         method: 'GET',
         url: '/api/v0/memories/search',
-        data: payload
+        params: payload
       });
       return response.data;
     } catch (error: any) {
@@ -164,7 +164,7 @@ export class EverMemClient {
       const response = await this.client.request({
         method: 'GET',
         url: '/api/v0/memories',
-        data: payload
+        params: payload
       });
       return response.data;
     } catch (error: any) {
@@ -215,8 +215,7 @@ export class EverMemClient {
       const response = await this.client.request({
         method: 'GET',
         url: '/api/v0/memories/conversation-meta',
-        params: request.group_id ? { group_id: request.group_id } : undefined,
-        data: request.group_id ? { group_id: request.group_id } : {}
+        params: request.group_id ? { group_id: request.group_id } : undefined
       });
       return response.data;
     } catch (error: any) {
