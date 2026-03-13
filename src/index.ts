@@ -15,6 +15,7 @@ import {
   buildSearchFilters,
   chooseRetrieveMethod,
   estimateTokenCount,
+  extractFilesFromContent,
   filterSuperseded,
   getPlatformFromMemory,
   getSessionFromMemory,
@@ -629,6 +630,62 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'consolidate_memories',
+        description:
+          'Merge fragmented episodic memories into a single canonical profile-level fact. The AI should first search for related fragments, synthesize them, then call this tool with the consolidated summary and source IDs. Source memories are deleted after consolidation. Demonstrates the Memory → Reasoning → Action loop.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            consolidated_fact: {
+              type: 'string',
+              description: 'The AI-synthesized canonical summary merging all source fragments into one clear fact.',
+            },
+            source_memory_ids: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'IDs of the fragmented episodic memories being consolidated. These will be deleted after the canonical fact is saved.',
+            },
+            affected_files: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'File paths the consolidated fact relates to.',
+            },
+            component_layer: {
+              type: 'string',
+              description: 'Architectural layer (e.g. "api", "database", "frontend").',
+            },
+            wait_for_completion: {
+              type: 'boolean',
+              description: 'If true, poll until the consolidated write completes. Default false.',
+            },
+            timeout_seconds: {
+              type: 'number',
+              description: 'Polling timeout. Default 20.',
+            },
+          },
+          required: ['consolidated_fact', 'source_memory_ids'],
+        },
+      },
+      {
+        name: 'scan_stale_memories',
+        description:
+          'Detect potentially stale memories by cross-referencing recent git changes against file-anchored memories. Returns memories whose anchored files have been modified in recent commits, indicating the decision may need review.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            commits_back: {
+              type: 'number',
+              description: 'How many commits back to scan for changed files. Default 5, max 20.',
+            },
+            query: {
+              type: 'string',
+              description: 'Optional query to narrow the memory search. If omitted, searches broadly for file-anchored decisions.',
+            },
+          },
+          required: [],
+        },
+      },
+      {
         name: 'get_conversation_meta',
         description: 'Get conversation metadata for the current group or a specified group_id.',
         inputSchema: {
@@ -1230,6 +1287,211 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: `Future task saved. request_id: ${write.result?.request_id || 'n/a'}, status: ${write.finalStatus}`,
+            },
+          ],
+        };
+      }
+
+      case 'consolidate_memories': {
+        const args = request.params.arguments as {
+          consolidated_fact: string;
+          source_memory_ids: string[];
+          affected_files?: string[];
+          component_layer?: string;
+        } & WaitOptions;
+
+        const sanitized = sanitizeForMemoryWrite(args.consolidated_fact);
+        if (!sanitized) {
+          return {
+            content: [{ type: 'text', text: 'Consolidated fact not saved because all content was marked private.' }],
+          };
+        }
+
+        const sourceIds = (args.source_memory_ids || []).filter(Boolean);
+        if (sourceIds.length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, 'source_memory_ids must contain at least one ID.');
+        }
+
+        const prefix = buildContentPrefix({
+          affectedFiles: args.affected_files,
+          componentLayer: args.component_layer,
+        });
+        const referList = args.affected_files?.length ? args.affected_files : undefined;
+        const consolidationTag = `[consolidated from ${sourceIds.length} sources] `;
+        const supersedesTag = `[supersedes:${sourceIds.join(',')}] `;
+
+        if (args.affected_files?.length) {
+          autoTagConversationMeta(args.affected_files);
+        }
+
+        // Write the canonical consolidated fact
+        const writeResult = await addMemoryWithOptionalWait(
+          {
+            message_id: buildMessageId('consolidated'),
+            create_time: new Date().toISOString(),
+            sender: DEFAULT_USER_ID,
+            role: 'assistant',
+            group_id: DEFAULT_GROUP_ID,
+            content: `${prefix}${consolidationTag}${supersedesTag}Consolidated fact: ${sanitized}`,
+            refer_list: referList,
+            flush: true,
+          },
+          args
+        );
+
+        // Delete source fragments
+        const deleteResults: Array<{ id: string; success: boolean }> = [];
+        for (const sourceId of sourceIds) {
+          try {
+            await evermem.deleteMemories({
+              memory_id: sourceId,
+              user_id: DEFAULT_USER_ID,
+              group_id: DEFAULT_GROUP_ID,
+            });
+            deleteResults.push({ id: sourceId, success: true });
+          } catch {
+            deleteResults.push({ id: sourceId, success: false });
+          }
+        }
+
+        const deletedCount = deleteResults.filter((d) => d.success).length;
+        const failedDeletes = deleteResults.filter((d) => !d.success);
+        const failedInfo = failedDeletes.length > 0
+          ? ` (failed to delete: ${failedDeletes.map((d) => d.id).join(', ')})`
+          : '';
+
+        logEvent('info', 'memory.consolidated', {
+          source_count: sourceIds.length,
+          deleted_count: deletedCount,
+          request_id: writeResult.result?.request_id,
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `Consolidation complete: ${sourceIds.length} fragments → 1 canonical fact.\n` +
+                `- Write request_id: ${writeResult.result?.request_id || 'n/a'}, status: ${writeResult.finalStatus}\n` +
+                `- Deleted ${deletedCount}/${sourceIds.length} source fragments${failedInfo}`,
+            },
+          ],
+        };
+      }
+
+      case 'scan_stale_memories': {
+        const args = request.params.arguments as {
+          commits_back?: number;
+          query?: string;
+        };
+
+        const commitsBack = Math.min(20, Math.max(1, Math.floor(args.commits_back || 5)));
+
+        // Get recently changed files from git
+        let changedFiles: string[] = [];
+        try {
+          const diffOutput = execSync(`git diff --name-only HEAD~${commitsBack}`, { encoding: 'utf-8' }).trim();
+          changedFiles = diffOutput.split('\n').filter(Boolean);
+        } catch {
+          try {
+            // Fallback: if HEAD~N doesn't exist (shallow clone or few commits), use HEAD~1
+            const diffOutput = execSync('git diff --name-only HEAD~1', { encoding: 'utf-8' }).trim();
+            changedFiles = diffOutput.split('\n').filter(Boolean);
+          } catch {
+            return {
+              content: [{ type: 'text', text: 'Cannot scan for stale memories: not in a git repository or no commit history.' }],
+            };
+          }
+        }
+
+        if (changedFiles.length === 0) {
+          return {
+            content: [{ type: 'text', text: `No files changed in the last ${commitsBack} commit(s). No stale memories to report.` }],
+          };
+        }
+
+        // Search memories that might reference changed files
+        const searchQuery = args.query || 'architectural decision technical preference';
+        const searchFilters = buildSearchFilters('repo', DEFAULT_USER_ID, DEFAULT_GROUP_ID);
+
+        let memories: SearchMemoryRecord[] = [];
+        try {
+          const result = await evermem.searchMemories({
+            ...searchFilters,
+            query: searchQuery,
+            memory_types: ['episodic_memory', 'profile'],
+            retrieve_method: 'hybrid',
+            top_k: 30,
+          });
+          memories = (result?.result?.memories || []) as SearchMemoryRecord[];
+        } catch {
+          return {
+            content: [{ type: 'text', text: 'Failed to search memories for staleness check.' }],
+            isError: true,
+          };
+        }
+
+        // Cross-reference: find memories whose content references changed files
+        const staleMatches: Array<{
+          memory: SearchMemoryRecord;
+          matchedFiles: string[];
+        }> = [];
+
+        for (const mem of memories) {
+          const memText = [mem.summary, mem.atomic_fact, mem.content].filter(Boolean).join(' ');
+          const memFiles = extractFilesFromContent(memText);
+          const matchedFiles: string[] = [];
+
+          for (const changedFile of changedFiles) {
+            // Check if memory content mentions the changed file
+            if (memText.includes(changedFile)) {
+              matchedFiles.push(changedFile);
+            } else {
+              // Check extracted files list for partial matches
+              for (const memFile of memFiles) {
+                if (memFile.includes(changedFile) || changedFile.includes(memFile)) {
+                  matchedFiles.push(changedFile);
+                  break;
+                }
+              }
+            }
+          }
+
+          if (matchedFiles.length > 0) {
+            staleMatches.push({ memory: mem, matchedFiles });
+          }
+        }
+
+        if (staleMatches.length === 0) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Scanned ${changedFiles.length} changed file(s) across ${commitsBack} commit(s) against ${memories.length} memories. No potentially stale memories found.`,
+              },
+            ],
+          };
+        }
+
+        const rows = staleMatches.map((match, idx) => {
+          const mem = match.memory;
+          const brief = mem.summary || mem.atomic_fact || mem.content || '(no content)';
+          const compact = brief.length > 120 ? `${brief.slice(0, 117)}...` : brief;
+          return `[${idx + 1}] id=${mem.id || 'n/a'} | changed: ${match.matchedFiles.join(', ')} | ${compact}`;
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `Found ${staleMatches.length} potentially stale memor${staleMatches.length === 1 ? 'y' : 'ies'} ` +
+                `(${changedFiles.length} file(s) changed in last ${commitsBack} commit(s)):\n\n` +
+                `${rows.join('\n')}\n\n` +
+                `Suggested actions:\n` +
+                `- Review each memory to confirm if it is still accurate\n` +
+                `- Use consolidate_memories to merge outdated fragments into updated canonical facts\n` +
+                `- Use save_project_decision with supersedes_ids to record updated decisions`,
             },
           ],
         };
