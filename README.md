@@ -17,27 +17,130 @@ When your AI IDE writes code, it autonomously queries CodeMem to retrieve projec
 - **Conversational Saving** — Just tell your AI: *"Save the decision that we are using Tailwind for this project."*
 - **Autonomous Retrieval** — The AI automatically searches your memory bank before writing code.
 - **Shared AI Brain** — Syncs context seamlessly across all your AI development tools.
-- **Full Memory Lifecycle** — Save, search, browse, and delete memories with safety checks and status tracking.
+- **Full Memory Lifecycle** — Save, search, browse, consolidate, and delete memories with safety checks and status tracking.
 - **Multiple Retrieval Strategies** — Keyword, vector, hybrid, and LLM-guided agentic retrieval.
 - **Hierarchical Decision Writes** — Important decisions are stored in both narrative and atomic-fact formats to improve retrieval depth.
-- **Conversation Metadata Control** — Read and update conversation metadata to tune extraction/retrieval behavior.
+- **Spatial Memory** — Anchor memories to specific files and architectural layers. File-scoped search filters noise to only what's relevant to your current context.
+- **Git-Anchored Context** — Memories automatically embed the current branch and commit hash, enabling temporal traceability across your project history.
+- **Supersession Convention** — Mark old decisions as replaced by new ones. Superseded memories are automatically filtered from search results.
+- **Memory Consolidation** — Merge fragmented episodic memories into a single canonical fact, demonstrating the Memory → Reasoning → Action loop.
+- **Staleness Detection** — Cross-reference recent git changes against file-anchored memories to surface decisions that may no longer be accurate.
+- **Conversation Metadata Control** — Read and update conversation metadata to tune extraction/retrieval behavior. Auto-tags sessions by detected architectural layer.
 
 ---
 
 ## Available Tools
 
-CodeMem exposes eight MCP tools to your IDE's AI:
+CodeMem exposes 13 MCP tools to your IDE's AI:
+
+### Write Tools
 
 | Tool | Description | Memory Type |
 |:---|:---|:---|
-| `save_project_decision` | Save architectural decisions with dual writes (narrative + atomic fact). Optional async wait for ingestion completion. | Episodic + Event-like |
-| `search_project_memory` | Search past decisions and context with scope control: "session", "repo", "all" (all projects for current user). Supports retrieval orchestration and agentic fallback. | Episodic + Profile |
-| `add_developer_preference` | Save coding style rules and preferences | Profile |
-| `list_recent_memories` | Browse saved memories by type with pagination | All types |
-| `delete_memory` | Delete by ID or bulk delete by type (requires explicit confirmation) | All types |
-| `add_foresight_todo` | Record future tasks, tech debt, or planned improvements | Foresight |
-| `get_conversation_meta` | Retrieve group conversation metadata used by EverMemOS extraction/retrieval | Meta |
-| `update_conversation_meta` | Update metadata fields (tags, timezone, scene, user details, llm settings) | Meta |
+| `save_project_decision` | Save architectural decisions with dual writes (narrative + atomic fact). Supports file anchoring, architectural layer, and supersession of prior decisions. | Episodic + Event-like |
+| `add_developer_preference` | Save coding style rules and preferences. Optionally anchor to specific files. | Profile |
+| `add_foresight_todo` | Record future tasks, tech debt, or planned improvements. Supports file anchoring and layer tagging. | Foresight |
+| `consolidate_memories` | Merge fragmented episodic memories into one canonical profile-level fact. Deletes source fragments after write. | Profile |
+
+### Retrieval Tools
+
+| Tool | Description | Memory Type |
+|:---|:---|:---|
+| `search_project_memory` | Search past decisions with scope control, optional file filtering, and automatic supersession deduplication. | Episodic + Profile |
+| `search_project_memory_index` | Compact index view with IDs, relevance scores, and token cost estimates. Supports file filtering. | Episodic + Profile |
+| `get_memory_timeline` | Show chronological context around a specific memory ID. | All types |
+| `get_memory_details` | Fetch full memory records by ID for deep reading. | All types |
+| `list_recent_memories` | Browse saved memories by type with pagination. | All types |
+| `scan_stale_memories` | Detect memories whose anchored files have been modified in recent commits. | Episodic |
+
+### Management Tools
+
+| Tool | Description | Memory Type |
+|:---|:---|:---|
+| `delete_memory` | Delete by ID or bulk-delete by type (requires explicit confirmation). | All types |
+| `get_conversation_meta` | Retrieve group conversation metadata used by EverMemOS extraction/retrieval. | Meta |
+| `update_conversation_meta` | Update metadata fields (tags, timezone, scene, user details, llm settings). | Meta |
+
+---
+
+## Spatial Memory
+
+Memories can be anchored to specific files and architectural layers, enabling precise file-scoped retrieval and graph-based relationships within EverMemOS.
+
+### Anchoring a Decision to Files
+
+```
+AI: "We decided to use Zod for request validation in the API layer.
+     Save that with affected_files: ['src/api/routes.ts', 'src/api/middleware.ts']
+     and component_layer: 'api'."
+```
+
+The saved memory will be prefixed with:
+```
+[files:src/api/routes.ts,src/api/middleware.ts | layer:api | branch:main | commit:a3f1b2c]
+```
+
+This prefix is also sent as `refer_list` to EverMemOS, enabling native graph-based retrieval.
+
+### File-Scoped Search
+
+```
+AI: "What decisions exist specifically for src/api/routes.ts?"
+→ search_project_memory(query="decisions", file_filter="src/api/routes.ts")
+→ Returns only memories anchored to that file
+```
+
+### Supported `component_layer` Values
+
+`api` · `database` · `frontend` · `auth` · `infrastructure` · `testing` · `config`
+
+Auto-tagging: on first write with `affected_files`, CodeMem silently updates the conversation metadata with detected layer tags — no manual step needed.
+
+---
+
+## Memory Evolution (Supersession & Consolidation)
+
+### Superseding an Outdated Decision
+
+When a decision changes, mark the old memory as replaced:
+
+```
+AI: "We switched from REST to GraphQL. Save as a new decision superseding
+     memory ID mem_abc123."
+→ save_project_decision(content="...", supersedes_ids=["mem_abc123"])
+```
+
+The new memory embeds `[supersedes:mem_abc123]`. Both search tools automatically filter out superseded memories when the newer one appears in the same result set.
+
+### Consolidating Fragmented Memories
+
+Over time, multiple small decisions about the same topic accumulate. Consolidation merges them into a single canonical fact:
+
+1. **Search** — find related fragments with `search_project_memory`
+2. **Reason** — the AI synthesizes a unified canonical summary
+3. **Act** — call `consolidate_memories` with the synthesis and source IDs
+
+```
+AI: "Consolidate these three auth-related memories into one canonical fact."
+→ consolidate_memories(
+     consolidated_fact="Auth uses session cookies (not JWT) for XSS resistance,
+                        enforced in src/auth/session.ts since commit a3f1b2c.",
+     source_memory_ids=["mem_1", "mem_2", "mem_3"],
+     affected_files=["src/auth/session.ts"],
+     component_layer="auth"
+   )
+→ Writes 1 canonical fact, deletes 3 source fragments
+```
+
+### Detecting Stale Memories
+
+When code changes, decisions may become outdated:
+
+```
+AI: "Check if any saved decisions reference files I've recently changed."
+→ scan_stale_memories(commits_back=5)
+→ Returns memories anchored to recently modified files with suggested actions
+```
 
 ---
 
@@ -56,6 +159,8 @@ CodeMem identifies you in this priority order:
 CodeMem detects your project automatically:
 1. **Override** — Set `GROUP_ID` env var to manually specify
 2. **Git Repository** — Uses the folder name of your git repo root (e.g., "CodeMem")
+
+> **Note:** If `USER_ID` or `GROUP_ID` are set in your `.env`, they take priority and suppress auto-detection. Remove them to let git config drive identity automatically.
 
 ### Platform Detection (Automatic)
 CodeMem detects which IDE/tool is using it:
@@ -157,12 +262,6 @@ EVERMEM_API_KEY=your_api_key_here
 
 **Optional (auto-detected if not specified):**
 ```env
-# User identification - auto-detected from GitHub config or local username
-USER_ID=your_username
-
-# Project/group name - auto-detected from git repo folder name
-GROUP_ID=project_name
-
 # GitHub token for enterprise users (reads GH username from API)
 GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
@@ -172,6 +271,10 @@ PLATFORM=cursor
 
 # Default memory retrieval scope: 'session' | 'repo' | 'all' (default: 'repo')
 MEMORY_SCOPE=repo
+
+# Override auto-detected identity (leave unset to use git config / repo name)
+# USER_ID=your_username
+# GROUP_ID=project_name
 ```
 
 **Auto-Detection Priority:**
@@ -218,9 +321,7 @@ Because CodeMem is a standard MCP server, connecting it to your favorite tools i
       "command": "node",
       "args": ["/absolute/path/to/CodeMem/dist/index.js"],
       "env": {
-        "EVERMEM_API_KEY": "your_api_key_here",
-        "USER_ID": "my_local_user",
-        "GROUP_ID": "my_project_group"
+        "EVERMEM_API_KEY": "your_api_key_here"
       }
     }
   }
@@ -246,24 +347,12 @@ claude mcp add codemem node /absolute/path/to/CodeMem/dist/index.js \
   -e MEMORY_SCOPE=repo
 ```
 
-**Full configuration (if overriding auto-detected values):**
-```bash
-claude mcp add codemem node /absolute/path/to/CodeMem/dist/index.js \
-  -e EVERMEM_API_KEY=your_api_key_here \
-  -e USER_ID=custom_user \
-  -e GROUP_ID=custom_project \
-  -e PLATFORM=claude-code \
-  -e MEMORY_SCOPE=repo
-```
-
 **Auto-Detection:**
 CodeMem will automatically detect:
-- `USER_ID` from env override, GitHub config, or system username
-- `GROUP_ID` from env override or git repository folder name
+- `USER_ID` from GitHub config or system username
+- `GROUP_ID` from git repository folder name
 - `PLATFORM` from environment variables or parent process (detects "claude-code" automatically)
 - `SESSION_ID` generates a unique ID for this invocation
-
-You only need to set these explicitly if you want to override the auto-detected values.
 
 ### Other MCP-Compatible Tools (Cline, Roo Code, Antigravity, etc.)
 
@@ -301,35 +390,37 @@ The AI will then silently search memory before writing code and save new decisio
 
 You can also use CodeMem manually by talking to your AI naturally:
 
-**Saving a decision:**
-> "We just decided to use Zustand for state management. Save that to project memory."
+**Saving a decision with spatial anchoring:**
+> "We decided to use Zod for validation in the API layer. Save that with
+> affected_files: ['src/api/routes.ts'] and component_layer: 'api'."
 
-**Saving and waiting for ingestion completion:**
-> "Call save_project_decision with wait_for_completion=true and timeout_seconds=30."
+**Saving a decision that replaces an old one:**
+> "We switched from MongoDB to PostgreSQL. Save that decision
+> and supersede memory ID mem_abc123."
+
+**Searching context filtered to a specific file:**
+> "What decisions exist for src/auth/session.ts specifically?"
+
+**Detecting stale memories after a refactor:**
+> "I just rewrote the auth module. Scan for stale memories that reference
+> those changed files."
+
+**Consolidating fragmented memories:**
+> "I have 4 small memories about our database setup. Consolidate them
+> into one canonical fact."
 
 **Setting a preference:**
 > "I always want error handling to use Try/Catch blocks. Save that preference."
 
-**Searching context (default repo scope):**
-> "What database did we decide to use for this project?"
->
-> Result: Shows all database decisions, including which platform/IDE created each one (e.g., [current via claude-code], [session-xxx via cursor])
-
 **Searching within current session:**
 > "Search memory for decisions made in this session only."
->
-> Result: Returns only memories from this coding session
-
-**Searching across all knowledge:**
-> "Search all project memories for authentication patterns we've used."
->
-> Result: Shows patterns across all repositories for the current user identity
 
 **Browsing all memories:**
 > "List all the project decisions we've saved so far."
 
 **Recording tech debt:**
-> "We need to add rate limiting to the API before launch. Record that as a future task."
+> "We need to add rate limiting to the API before launch. Record that as
+> a future task with affected_files: ['src/api/routes.ts']."
 
 **Deleting outdated context:**
 > "Delete the memory about using MongoDB — we switched to PostgreSQL."
@@ -374,9 +465,9 @@ You can also use CodeMem manually by talking to your AI naturally:
 
 ## Competition Alignment (Genesis)
 
-- **Quality & Execution:** Adds safer delete controls, deterministic scope semantics, and request lifecycle visibility.
-- **Memory Integration:** Uses dual-write decision storage (narrative + atomic fact), scoped retrieval, and conversation metadata controls.
-- **Memory -> Reasoning -> Action Loop:** Search-first prompts + decision/preference/todo capture + optional ingestion completion checks.
+- **Quality & Execution:** Stable MCP server with auto-detection, scoped retrieval, safe bulk-delete guards, request lifecycle visibility, and git-aware context injection. All parameters are optional and backward-compatible.
+- **Memory Integration:** Uses dual-write decision storage (narrative + atomic fact), EverMemOS `refer_list` for graph-based file relationships, structured `[files | layer | branch | commit]` content prefixes, hierarchical consolidation from episodic fragments to canonical profile facts, and automatic conversation metadata tagging.
+- **Memory → Reasoning → Action Loop:** `scan_stale_memories` detects drift between code and decisions → AI reasons about which memories need updating → `consolidate_memories` or `save_project_decision` with `supersedes_ids` closes the loop. Search-first prompts ensure retrieved context actively shapes every new code change.
 
 ---
 

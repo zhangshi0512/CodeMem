@@ -7,7 +7,11 @@
       "Bash(xargs grep:*)",
       "Bash(npm run:*)",
       "Bash(curl:*)",
-      "mcp__codemem__save_project_decision"
+      "mcp__codemem__save_project_decision",
+      "mcp__claude_ai_EchoChat_Memory__save_conversation",
+      "mcp__claude_ai_EchoChat_Memory__search_memories",
+      "mcp__codemem__search_project_memory",
+      "mcp__codemem__list_recent_memories"
     ]
   }
 }
