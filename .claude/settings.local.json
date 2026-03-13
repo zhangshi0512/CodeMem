@@ -6,7 +6,8 @@
       "Bash(claude mcp:*)",
       "Bash(xargs grep:*)",
       "Bash(npm run:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "mcp__codemem__save_project_decision"
     ]
   }
 }
