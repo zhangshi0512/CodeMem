@@ -15,9 +15,11 @@ import {
   buildSearchFilters,
   chooseRetrieveMethod,
   estimateTokenCount,
+  filterSuperseded,
   getPlatformFromMemory,
   getSessionFromMemory,
   isBulkDelete,
+  matchesFileFilter,
   normalizeScope,
   SearchMemoryRecord,
 } from './policies.js';
@@ -190,6 +192,39 @@ const DEDUPE_WINDOW_MS = Math.max(10, Number(process.env.DEDUPE_WINDOW_SECONDS |
 const PLATFORM = detectPlatform();
 const evermem = new EverMemClient(EVERMEM_API_KEY);
 const writeDedupe = createWriteDedupeRegistry(DEDUPE_WINDOW_MS);
+let sessionMetaTagged = false;
+
+function detectComponentLayers(files: string[]): string[] {
+  const layers = new Set<string>();
+  for (const file of files) {
+    const lower = file.toLowerCase().replace(/\\/g, '/');
+    if (/\/(api|routes?|endpoints?|controllers?)\//i.test(lower)) layers.add('api');
+    if (/\/(db|database|migrations?|schemas?|models?)\//i.test(lower)) layers.add('database');
+    if (/\/(components?|pages?|views?|ui|frontend|styles?)\//i.test(lower) || /\.(css|scss|jsx|tsx)$/.test(lower)) layers.add('frontend');
+    if (/\/(auth|sessions?|permissions?|rbac)\//i.test(lower)) layers.add('auth');
+    if (/\/(infra|deploy|ci|docker|terraform|k8s)\//i.test(lower)) layers.add('infrastructure');
+    if (/\/(tests?|specs?|__tests?__)\//i.test(lower) || /\.(test|spec)\.[jt]sx?$/.test(lower)) layers.add('testing');
+    if (/\/(configs?|settings?|env)\//i.test(lower)) layers.add('config');
+  }
+  return Array.from(layers);
+}
+
+function autoTagConversationMeta(affectedFiles: string[]): void {
+  if (sessionMetaTagged || !affectedFiles.length) return;
+  sessionMetaTagged = true;
+
+  const layers = detectComponentLayers(affectedFiles);
+  if (layers.length === 0) return;
+
+  evermem.updateConversationMeta({
+    group_id: DEFAULT_GROUP_ID,
+    tags: layers,
+  }).then(() => {
+    logEvent('info', 'meta.auto_tagged', { tags: layers });
+  }).catch((err) => {
+    logEvent('warn', 'meta.auto_tag_failed', { message: err?.message });
+  });
+}
 
 type WaitOptions = {
   wait_for_completion?: boolean;
@@ -386,6 +421,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'Architectural layer this decision belongs to (e.g. "api", "database", "frontend", "auth", "infrastructure").',
             },
+            supersedes_ids: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Memory IDs that this decision replaces. Superseded memories are automatically filtered from future search results.',
+            },
             wait_for_completion: {
               type: 'boolean',
               description: 'If true, poll request status until completion or timeout.',
@@ -401,7 +441,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'search_project_memory',
         description:
-          'Search memory with scope control. Retrieval method is auto-orchestrated unless explicitly provided.',
+          'Search memory with scope control. Retrieval method is auto-orchestrated unless explicitly provided. Supports file-scoped filtering and automatic supersession deduplication.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -415,6 +455,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               enum: ['session', 'repo', 'all'],
               description: 'session=current session, repo=current project, all=all projects for current user.',
+            },
+            file_filter: {
+              type: 'string',
+              description: 'Filter results to memories anchored to this file path (e.g. "src/api/routes.ts"). Matches against content prefix and refer_list.',
             },
           },
           required: ['query'],
@@ -423,7 +467,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'search_project_memory_index',
         description:
-          'Step 1 (compact index): return lightweight results with IDs, relevance, and estimated read cost.',
+          'Step 1 (compact index): return lightweight results with IDs, relevance, and estimated read cost. Supports file-scoped filtering and automatic supersession deduplication.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -437,6 +481,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               enum: ['session', 'repo', 'all'],
               description: 'session=current session, repo=current project, all=all projects for current user.',
+            },
+            file_filter: {
+              type: 'string',
+              description: 'Filter results to memories anchored to this file path (e.g. "src/api/routes.ts").',
             },
             limit: {
               type: 'number',
@@ -630,6 +678,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: string;
           affected_files?: string[];
           component_layer?: string;
+          supersedes_ids?: string[];
         } & WaitOptions;
         const sanitized = sanitizeForMemoryWrite(args.content);
         if (!sanitized) {
@@ -657,7 +706,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           affectedFiles: args.affected_files,
           componentLayer: args.component_layer,
         });
+        const supersedesTag = args.supersedes_ids?.length
+          ? `[supersedes:${args.supersedes_ids.join(',')}] `
+          : '';
         const referList = args.affected_files?.length ? args.affected_files : undefined;
+
+        if (args.affected_files?.length) {
+          autoTagConversationMeta(args.affected_files);
+        }
 
         const episodicPayload: AddMemoryRequest = {
           message_id: buildMessageId('decisionepi'),
@@ -665,7 +721,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sender: DEFAULT_USER_ID,
           role: 'assistant',
           group_id: DEFAULT_GROUP_ID,
-          content: `${prefix}Architectural decision and rationale: ${sanitized}`,
+          content: `${prefix}${supersedesTag}Architectural decision and rationale: ${sanitized}`,
           refer_list: referList,
           flush: true,
         };
@@ -676,7 +732,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sender: DEFAULT_USER_ID,
           role: 'assistant',
           group_id: DEFAULT_GROUP_ID,
-          content: `${prefix}Atomic engineering fact: ${sanitized}`,
+          content: `${prefix}${supersedesTag}Atomic engineering fact: ${sanitized}`,
           refer_list: referList,
           flush: true,
         };
@@ -687,12 +743,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ]);
 
         const anchorInfo = referList ? ` anchored to ${referList.length} file(s)` : '';
+        const supersedesInfo = args.supersedes_ids?.length ? ` superseding ${args.supersedes_ids.length} prior decision(s)` : '';
         return {
           content: [
             {
               type: 'text',
               text:
-                `Decision saved with hierarchical writes${anchorInfo}:\n` +
+                `Decision saved with hierarchical writes${anchorInfo}${supersedesInfo}:\n` +
                 `- episodic request_id: ${episodicResult.result?.request_id || 'n/a'} status: ${episodicResult.finalStatus}\n` +
                 `- event-like request_id: ${eventResult.result?.request_id || 'n/a'} status: ${eventResult.finalStatus}`,
             },
@@ -701,7 +758,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_project_memory': {
-        const args = request.params.arguments as { query: string; retrieve_method?: string; scope?: string };
+        const args = request.params.arguments as {
+          query: string;
+          retrieve_method?: string;
+          scope?: string;
+          file_filter?: string;
+        };
         const scope = normalizeScope(args.scope, DEFAULT_MEMORY_SCOPE);
         const searchFilters = buildSearchFilters(scope, DEFAULT_USER_ID, DEFAULT_GROUP_ID);
         const selectedMethod = chooseRetrieveMethod(args.query, args.retrieve_method);
@@ -734,20 +796,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
-        let filteredMemories = result?.result?.memories || [];
+        let filteredMemories = (result?.result?.memories || []) as SearchMemoryRecord[];
         if (scope === 'session') {
-          filteredMemories = filteredMemories.filter((mem: any) => {
-            const session = getSessionFromMemory(mem as SearchMemoryRecord);
+          filteredMemories = filteredMemories.filter((mem) => {
+            const session = getSessionFromMemory(mem);
             return session === SESSION_ID || session === null;
           });
         }
+
+        // Phase 2a: file-scoped filtering
+        if (args.file_filter) {
+          filteredMemories = filteredMemories.filter((mem) => matchesFileFilter(mem, args.file_filter!));
+        }
+
+        // Phase 2b: supersession deduplication
+        filteredMemories = filterSuperseded(filteredMemories);
 
         let output = '';
         let count = 0;
         for (const [idx, mem] of filteredMemories.slice(0, 10).entries()) {
           count += 1;
-          const memSession = getSessionFromMemory(mem as SearchMemoryRecord);
-          const memPlatform = getPlatformFromMemory(mem as SearchMemoryRecord);
+          const memSession = getSessionFromMemory(mem);
+          const memPlatform = getPlatformFromMemory(mem);
           const sessionLabel = memSession ? (memSession === SESSION_ID ? 'current' : memSession) : 'unknown-session';
           const platformLabel = memPlatform ? ` via ${memPlatform}` : '';
 
@@ -771,11 +841,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        const filterLabel = args.file_filter ? `, file: ${args.file_filter}` : '';
         if (count === 0) {
-          output = `No relevant memories found (scope: ${scope}, method: ${methodUsed}).`;
+          output = `No relevant memories found (scope: ${scope}, method: ${methodUsed}${filterLabel}).`;
         } else {
           output =
-            `Found ${count} memories (scope: ${scope}, method: ${methodUsed}${fallbackUsed ? ', fallback: yes' : ''}):\n\n` +
+            `Found ${count} memories (scope: ${scope}, method: ${methodUsed}${fallbackUsed ? ', fallback: yes' : ''}${filterLabel}):\n\n` +
             output;
         }
 
@@ -787,6 +858,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           query: string;
           retrieve_method?: string;
           scope?: string;
+          file_filter?: string;
           limit?: number;
         };
         const scope = normalizeScope(args.scope, DEFAULT_MEMORY_SCOPE);
@@ -830,6 +902,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           });
         }
 
+        // Phase 2a: file-scoped filtering
+        if (args.file_filter) {
+          memories = memories.filter((mem) => matchesFileFilter(mem, args.file_filter!));
+        }
+
+        // Phase 2b: supersession deduplication
+        memories = filterSuperseded(memories);
+
         const rows = memories.slice(0, limit).map((mem, idx) => {
           const session = getSessionFromMemory(mem);
           const platform = getPlatformFromMemory(mem);
@@ -847,10 +927,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return acc + estimateTokenCount([mem.summary, mem.atomic_fact, mem.content]);
         }, 0);
 
+        const filterLabel = args.file_filter ? `, file: ${args.file_filter}` : '';
         const text =
           total === 0
-            ? `No relevant memories found (scope: ${scope}, method: ${methodUsed}).`
-            : `Index results: ${total} (scope: ${scope}, method: ${methodUsed}${fallbackUsed ? ', fallback: yes' : ''}, est_read_tokens: ~${estimatedReadTokens})\n\n${rows.join('\n')}`;
+            ? `No relevant memories found (scope: ${scope}, method: ${methodUsed}${filterLabel}).`
+            : `Index results: ${total} (scope: ${scope}, method: ${methodUsed}${fallbackUsed ? ', fallback: yes' : ''}${filterLabel}, est_read_tokens: ~${estimatedReadTokens})\n\n${rows.join('\n')}`;
 
         return { content: [{ type: 'text', text }] };
       }
@@ -992,6 +1073,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const prefix = buildContentPrefix({ affectedFiles: args.affected_files });
         const referList = args.affected_files?.length ? args.affected_files : undefined;
 
+        if (args.affected_files?.length) {
+          autoTagConversationMeta(args.affected_files);
+        }
+
         const write = await addMemoryWithOptionalWait(
           {
             message_id: buildMessageId('pref'),
@@ -1121,6 +1206,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           componentLayer: args.component_layer,
         });
         const referList = args.affected_files?.length ? args.affected_files : undefined;
+
+        if (args.affected_files?.length) {
+          autoTagConversationMeta(args.affected_files);
+        }
 
         const write = await addMemoryWithOptionalWait(
           {

@@ -90,3 +90,48 @@ export function estimateTokenCount(parts: Array<string | undefined>): number {
 export function isBulkDelete(memoryId?: string): boolean {
   return !memoryId || memoryId === '__all__';
 }
+
+/**
+ * Extract file paths from the structured content prefix [files:a.ts,b.ts | ...]
+ */
+export function extractFilesFromContent(text: string): string[] {
+  const match = text.match(/\[files:([^\]|]+)/);
+  if (!match) return [];
+  return match[1].split(',').map((f) => f.trim()).filter(Boolean);
+}
+
+/**
+ * Check if a memory's text fields reference a given file path.
+ * Uses substring matching on combined text + parsed file list prefix matching.
+ */
+export function matchesFileFilter(mem: SearchMemoryRecord, fileFilter: string): boolean {
+  const searchText = [mem.summary, mem.atomic_fact, mem.content].filter(Boolean).join(' ');
+  if (searchText.includes(fileFilter)) return true;
+  const files = extractFilesFromContent(searchText);
+  return files.some((f) => f.includes(fileFilter) || fileFilter.includes(f));
+}
+
+/**
+ * Extract superseded memory IDs from [supersedes:id1,id2] tag in content.
+ */
+export function extractSupersededIds(text: string): string[] {
+  const match = text.match(/\[supersedes:([^\]]+)\]/);
+  if (!match) return [];
+  return match[1].split(',').map((id) => id.trim()).filter(Boolean);
+}
+
+/**
+ * Remove memories that are superseded by other memories in the same result set.
+ * If memory Y contains [supersedes:X] and both X and Y are in the list, drop X.
+ */
+export function filterSuperseded(memories: SearchMemoryRecord[]): SearchMemoryRecord[] {
+  const supersededIds = new Set<string>();
+  for (const mem of memories) {
+    const text = [mem.summary, mem.atomic_fact, mem.content].filter(Boolean).join(' ');
+    for (const id of extractSupersededIds(text)) {
+      supersededIds.add(id);
+    }
+  }
+  if (supersededIds.size === 0) return memories;
+  return memories.filter((mem) => !mem.id || !supersededIds.has(mem.id));
+}
