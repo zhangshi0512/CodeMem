@@ -1509,15 +1509,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           llm_custom_setting?: Record<string, unknown>;
         };
 
-        const payload = {
+        // Build payload with only defined values (EverMemOS PATCH rejects undefined fields)
+        const payload: Record<string, unknown> = {
           group_id: args?.group_id || DEFAULT_GROUP_ID,
-          description: args?.description,
-          tags: args?.tags,
-          default_timezone: args?.default_timezone,
-          scene_desc: args?.scene_desc,
-          user_details: args?.user_details as any,
-          llm_custom_setting: args?.llm_custom_setting as any,
         };
+        if (args?.description !== undefined) payload.description = args.description;
+        if (args?.tags !== undefined) payload.tags = args.tags;
+        if (args?.default_timezone !== undefined) payload.default_timezone = args.default_timezone;
+        if (args?.scene_desc !== undefined) payload.scene_desc = args.scene_desc;
+        if (args?.user_details !== undefined) payload.user_details = args.user_details;
+        if (args?.llm_custom_setting !== undefined) payload.llm_custom_setting = args.llm_custom_setting;
 
         const result = await evermem.updateConversationMeta(payload);
         return {
@@ -1561,9 +1562,10 @@ async function main() {
 
   // Set assistant scene so EverMemOS extracts EventLog and Foresight memory types.
   // Without this, group_id triggers group-chat scene which only extracts episodic_memory.
+  // Note: scene_desc only accepts { description }, not { scene } - scene must be set via POST
   evermem.updateConversationMeta({
     group_id: DEFAULT_GROUP_ID,
-    scene_desc: { scene: 'assistant', description: 'AI coding assistant session' },
+    scene_desc: { description: 'AI coding assistant session' },
   }).catch((err) => {
     logEvent('warn', 'server.scene_init_failed', { message: err?.message });
   });
