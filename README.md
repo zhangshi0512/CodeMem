@@ -65,7 +65,7 @@ CodeMem exposes 13 MCP tools to your IDE's AI:
 
 ## Spatial Memory
 
-Memories can be anchored to specific files and architectural layers, enabling precise file-scoped retrieval and graph-based relationships within EverMemOS.
+Memories can be anchored to specific files and architectural layers, enabling precise file-scoped retrieval via structured content prefixes.
 
 ### Anchoring a Decision to Files
 
@@ -80,7 +80,7 @@ The saved memory will be prefixed with:
 [files:src/api/routes.ts,src/api/middleware.ts | layer:api | branch:main | commit:a3f1b2c]
 ```
 
-This prefix is also sent as `refer_list` to EverMemOS, enabling native graph-based retrieval.
+This prefix is embedded in memory content, enabling keyword-based file-scoped search via the `file_filter` parameter.
 
 ### File-Scoped Search
 
@@ -466,7 +466,7 @@ You can also use CodeMem manually by talking to your AI naturally:
 ## Competition Alignment (Genesis)
 
 - **Quality & Execution:** Stable MCP server with auto-detection, scoped retrieval, safe bulk-delete guards, request lifecycle visibility, and git-aware context injection. All parameters are optional and backward-compatible.
-- **Memory Integration:** Uses dual-write decision storage (narrative + atomic fact), EverMemOS `refer_list` for graph-based file relationships, structured `[files | layer | branch | commit]` content prefixes, hierarchical consolidation from episodic fragments to canonical profile facts, and automatic conversation metadata tagging.
+- **Memory Integration:** Uses dual-write decision storage (narrative + atomic fact linked via `refer_list` threading), structured `[files | layer | branch | commit]` content prefixes for keyword-based file-scoped search, hierarchical consolidation from episodic fragments to canonical profile facts, and automatic conversation metadata tagging with `assistant` scene to unlock EventLog and Foresight extraction.
 - **Memory → Reasoning → Action Loop:** `scan_stale_memories` detects drift between code and decisions → AI reasons about which memories need updating → `consolidate_memories` or `save_project_decision` with `supersedes_ids` closes the loop. Search-first prompts ensure retrieved context actively shapes every new code change.
 
 ---

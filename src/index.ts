@@ -416,7 +416,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             affected_files: {
               type: 'array',
               items: { type: 'string' },
-              description: 'File paths this decision affects (e.g. ["src/api/routes.ts", "src/db/schema.ts"]). Used for graph-based retrieval.',
+              description: 'File paths this decision affects (e.g. ["src/api/routes.ts", "src/db/schema.ts"]). Embedded in content prefix for keyword-based file-scoped search.',
             },
             component_layer: {
               type: 'string',
@@ -459,7 +459,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             file_filter: {
               type: 'string',
-              description: 'Filter results to memories anchored to this file path (e.g. "src/api/routes.ts"). Matches against content prefix and refer_list.',
+              description: 'Filter results to memories anchored to this file path (e.g. "src/api/routes.ts"). Matches against the [files:...] content prefix and memory text.',
             },
           },
           required: ['query'],
@@ -547,7 +547,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             affected_files: {
               type: 'array',
               items: { type: 'string' },
-              description: 'File paths this preference applies to (e.g. ["src/components/**"]). Used for graph-based retrieval.',
+              description: 'File paths this preference applies to (e.g. ["src/components/**"]). Embedded in content prefix for keyword-based file-scoped search.',
             },
             wait_for_completion: {
               type: 'boolean',
@@ -611,7 +611,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             affected_files: {
               type: 'array',
               items: { type: 'string' },
-              description: 'File paths this task relates to (e.g. ["src/api/rate-limit.ts"]). Used for graph-based retrieval.',
+              description: 'File paths this task relates to (e.g. ["src/api/rate-limit.ts"]). Embedded in content prefix for keyword-based file-scoped search.',
             },
             component_layer: {
               type: 'string',
@@ -766,20 +766,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const supersedesTag = args.supersedes_ids?.length
           ? `[supersedes:${args.supersedes_ids.join(',')}] `
           : '';
-        const referList = args.affected_files?.length ? args.affected_files : undefined;
 
         if (args.affected_files?.length) {
           autoTagConversationMeta(args.affected_files);
         }
 
+        // Write episodic first, then link the event write back to it via refer_list
+        // (refer_list is for message ID threading, not file paths)
+        const episodicMsgId = buildMessageId('decisionepi');
         const episodicPayload: AddMemoryRequest = {
-          message_id: buildMessageId('decisionepi'),
+          message_id: episodicMsgId,
           create_time: new Date().toISOString(),
           sender: DEFAULT_USER_ID,
           role: 'assistant',
           group_id: DEFAULT_GROUP_ID,
           content: `${prefix}${supersedesTag}Architectural decision and rationale: ${sanitized}`,
-          refer_list: referList,
           flush: true,
         };
 
@@ -790,16 +791,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           role: 'assistant',
           group_id: DEFAULT_GROUP_ID,
           content: `${prefix}${supersedesTag}Atomic engineering fact: ${sanitized}`,
-          refer_list: referList,
+          refer_list: [episodicMsgId], // Thread event back to episodic for conversation graph
           flush: true,
         };
 
-        const [episodicResult, eventResult] = await Promise.all([
-          addMemoryWithOptionalWait(episodicPayload, args),
-          addMemoryWithOptionalWait(eventPayload, args),
-        ]);
+        const episodicResult = await addMemoryWithOptionalWait(episodicPayload, args);
+        const eventResult = await addMemoryWithOptionalWait(eventPayload, args);
 
-        const anchorInfo = referList ? ` anchored to ${referList.length} file(s)` : '';
+        const anchorInfo = args.affected_files?.length ? ` anchored to ${args.affected_files.length} file(s)` : '';
         const supersedesInfo = args.supersedes_ids?.length ? ` superseding ${args.supersedes_ids.length} prior decision(s)` : '';
         return {
           content: [
@@ -1128,7 +1127,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const prefix = buildContentPrefix({ affectedFiles: args.affected_files });
-        const referList = args.affected_files?.length ? args.affected_files : undefined;
 
         if (args.affected_files?.length) {
           autoTagConversationMeta(args.affected_files);
@@ -1142,7 +1140,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             group_id: DEFAULT_GROUP_ID,
             role: 'user',
             content: `${prefix}Developer preference: ${sanitized}`,
-            refer_list: referList,
             flush: true,
           },
           args
@@ -1262,7 +1259,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           affectedFiles: args.affected_files,
           componentLayer: args.component_layer,
         });
-        const referList = args.affected_files?.length ? args.affected_files : undefined;
 
         if (args.affected_files?.length) {
           autoTagConversationMeta(args.affected_files);
@@ -1276,7 +1272,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             group_id: DEFAULT_GROUP_ID,
             role: 'assistant',
             content: `${prefix}Future task / tech debt: ${sanitized}`,
-            refer_list: referList,
             flush: true,
           },
           args
@@ -1316,7 +1311,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           affectedFiles: args.affected_files,
           componentLayer: args.component_layer,
         });
-        const referList = args.affected_files?.length ? args.affected_files : undefined;
         const consolidationTag = `[consolidated from ${sourceIds.length} sources] `;
         const supersedesTag = `[supersedes:${sourceIds.join(',')}] `;
 
@@ -1333,7 +1327,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             role: 'assistant',
             group_id: DEFAULT_GROUP_ID,
             content: `${prefix}${consolidationTag}${supersedesTag}Consolidated fact: ${sanitized}`,
-            refer_list: referList,
             flush: true,
           },
           args
@@ -1564,6 +1557,15 @@ async function main() {
     platform: PLATFORM,
     default_scope: DEFAULT_MEMORY_SCOPE,
     dedupe_window_seconds: DEDUPE_WINDOW_MS / 1000,
+  });
+
+  // Set assistant scene so EverMemOS extracts EventLog and Foresight memory types.
+  // Without this, group_id triggers group-chat scene which only extracts episodic_memory.
+  evermem.updateConversationMeta({
+    group_id: DEFAULT_GROUP_ID,
+    scene_desc: { scene: 'assistant', description: 'AI coding assistant session' },
+  }).catch((err) => {
+    logEvent('warn', 'server.scene_init_failed', { message: err?.message });
   });
 }
 
