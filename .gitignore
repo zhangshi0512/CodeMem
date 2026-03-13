@@ -12,6 +12,8 @@ Developer_Log.txt
 Developer_Log_Claude.txt
 Developer_Log_Codex.txt
 MCP_setup.txt
+*.txt
+*.patch
 
 # Environment Variables
 .env
