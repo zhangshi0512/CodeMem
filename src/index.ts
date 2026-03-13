@@ -123,6 +123,48 @@ function detectPlatform(): string {
   return 'unknown';
 }
 
+function detectGitContext(): { commitHash: string; branch: string } {
+  let commitHash = 'unknown';
+  let branch = 'unknown';
+
+  try {
+    commitHash = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim();
+  } catch {
+    // Not in a git repo or git not available
+  }
+
+  try {
+    branch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8' }).trim();
+  } catch {
+    // Not in a git repo or git not available
+  }
+
+  return { commitHash, branch };
+}
+
+function buildContentPrefix(options: {
+  affectedFiles?: string[];
+  componentLayer?: string;
+}): string {
+  const git = detectGitContext();
+  const parts: string[] = [];
+
+  if (options.affectedFiles && options.affectedFiles.length > 0) {
+    parts.push(`files:${options.affectedFiles.join(',')}`);
+  }
+  if (options.componentLayer) {
+    parts.push(`layer:${options.componentLayer}`);
+  }
+  if (git.branch !== 'unknown') {
+    parts.push(`branch:${git.branch}`);
+  }
+  if (git.commitHash !== 'unknown') {
+    parts.push(`commit:${git.commitHash}`);
+  }
+
+  return parts.length > 0 ? `[${parts.join(' | ')}] ` : '';
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -330,11 +372,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'save_project_decision',
         description:
-          'Save a technical decision with dual writes: narrative context + atomic fact for stronger hierarchical retrieval.',
+          'Save a technical decision with dual writes: narrative context + atomic fact for stronger hierarchical retrieval. Optionally anchor to specific files and architectural layer for spatial retrieval.',
         inputSchema: {
           type: 'object',
           properties: {
             content: { type: 'string', description: 'Architectural decision and concise rationale.' },
+            affected_files: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'File paths this decision affects (e.g. ["src/api/routes.ts", "src/db/schema.ts"]). Used for graph-based retrieval.',
+            },
+            component_layer: {
+              type: 'string',
+              description: 'Architectural layer this decision belongs to (e.g. "api", "database", "frontend", "auth", "infrastructure").',
+            },
             wait_for_completion: {
               type: 'boolean',
               description: 'If true, poll request status until completion or timeout.',
@@ -439,11 +490,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'add_developer_preference',
-        description: 'Save a developer preference as profile memory.',
+        description: 'Save a developer preference as profile memory. Optionally anchor to specific files for spatial retrieval.',
         inputSchema: {
           type: 'object',
           properties: {
             preference: { type: 'string', description: 'Preference or coding rule to store.' },
+            affected_files: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'File paths this preference applies to (e.g. ["src/components/**"]). Used for graph-based retrieval.',
+            },
             wait_for_completion: {
               type: 'boolean',
               description: 'If true, poll request status until completion or timeout.',
@@ -498,11 +554,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'add_foresight_todo',
-        description: 'Save a future task/tech debt item as foresight memory.',
+        description: 'Save a future task/tech debt item as foresight memory. Optionally anchor to specific files and architectural layer.',
         inputSchema: {
           type: 'object',
           properties: {
             content: { type: 'string', description: 'Future task or plan.' },
+            affected_files: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'File paths this task relates to (e.g. ["src/api/rate-limit.ts"]). Used for graph-based retrieval.',
+            },
+            component_layer: {
+              type: 'string',
+              description: 'Architectural layer (e.g. "api", "database", "frontend", "auth", "infrastructure").',
+            },
             wait_for_completion: {
               type: 'boolean',
               description: 'If true, poll request status until completion or timeout.',
@@ -561,7 +626,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (toolName) {
       case 'save_project_decision': {
-        const args = request.params.arguments as { content: string } & WaitOptions;
+        const args = request.params.arguments as {
+          content: string;
+          affected_files?: string[];
+          component_layer?: string;
+        } & WaitOptions;
         const sanitized = sanitizeForMemoryWrite(args.content);
         if (!sanitized) {
           return {
@@ -584,13 +653,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
+        const prefix = buildContentPrefix({
+          affectedFiles: args.affected_files,
+          componentLayer: args.component_layer,
+        });
+        const referList = args.affected_files?.length ? args.affected_files : undefined;
+
         const episodicPayload: AddMemoryRequest = {
           message_id: buildMessageId('decisionepi'),
           create_time: new Date().toISOString(),
           sender: DEFAULT_USER_ID,
           role: 'assistant',
           group_id: DEFAULT_GROUP_ID,
-          content: `Architectural decision and rationale: ${sanitized}`,
+          content: `${prefix}Architectural decision and rationale: ${sanitized}`,
+          refer_list: referList,
           flush: true,
         };
 
@@ -600,7 +676,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sender: DEFAULT_USER_ID,
           role: 'assistant',
           group_id: DEFAULT_GROUP_ID,
-          content: `Atomic engineering fact: ${sanitized}`,
+          content: `${prefix}Atomic engineering fact: ${sanitized}`,
+          refer_list: referList,
           flush: true,
         };
 
@@ -609,12 +686,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           addMemoryWithOptionalWait(eventPayload, args),
         ]);
 
+        const anchorInfo = referList ? ` anchored to ${referList.length} file(s)` : '';
         return {
           content: [
             {
               type: 'text',
               text:
-                `Decision saved with hierarchical writes:\n` +
+                `Decision saved with hierarchical writes${anchorInfo}:\n` +
                 `- episodic request_id: ${episodicResult.result?.request_id || 'n/a'} status: ${episodicResult.finalStatus}\n` +
                 `- event-like request_id: ${eventResult.result?.request_id || 'n/a'} status: ${eventResult.finalStatus}`,
             },
@@ -885,7 +963,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'add_developer_preference': {
-        const args = request.params.arguments as { preference: string } & WaitOptions;
+        const args = request.params.arguments as {
+          preference: string;
+          affected_files?: string[];
+        } & WaitOptions;
         const sanitized = sanitizeForMemoryWrite(args.preference);
         if (!sanitized) {
           return {
@@ -908,6 +989,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
+        const prefix = buildContentPrefix({ affectedFiles: args.affected_files });
+        const referList = args.affected_files?.length ? args.affected_files : undefined;
+
         const write = await addMemoryWithOptionalWait(
           {
             message_id: buildMessageId('pref'),
@@ -915,7 +999,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             sender: DEFAULT_USER_ID,
             group_id: DEFAULT_GROUP_ID,
             role: 'user',
-            content: `Developer preference: ${sanitized}`,
+            content: `${prefix}Developer preference: ${sanitized}`,
+            refer_list: referList,
             flush: true,
           },
           args
@@ -1004,7 +1089,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'add_foresight_todo': {
-        const args = request.params.arguments as { content: string } & WaitOptions;
+        const args = request.params.arguments as {
+          content: string;
+          affected_files?: string[];
+          component_layer?: string;
+        } & WaitOptions;
         const sanitized = sanitizeForMemoryWrite(args.content);
         if (!sanitized) {
           return {
@@ -1027,6 +1116,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
+        const prefix = buildContentPrefix({
+          affectedFiles: args.affected_files,
+          componentLayer: args.component_layer,
+        });
+        const referList = args.affected_files?.length ? args.affected_files : undefined;
+
         const write = await addMemoryWithOptionalWait(
           {
             message_id: buildMessageId('todo'),
@@ -1034,7 +1129,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             sender: DEFAULT_USER_ID,
             group_id: DEFAULT_GROUP_ID,
             role: 'assistant',
-            content: `Future task / tech debt: ${sanitized}`,
+            content: `${prefix}Future task / tech debt: ${sanitized}`,
+            refer_list: referList,
             flush: true,
           },
           args
