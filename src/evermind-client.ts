@@ -95,6 +95,18 @@ export interface ConversationMetaPatchRequest {
   default_timezone?: string | null;
 }
 
+export interface ConversationMetaCreateRequest {
+  group_id?: string;
+  scene: 'assistant' | 'group_chat';
+  scene_desc?: Record<string, any> | null;
+  llm_custom_setting?: ConversationMetaPatchRequest['llm_custom_setting'];
+  description?: string | null;
+  created_at: string;
+  default_timezone?: string | null;
+  user_details?: ConversationMetaPatchRequest['user_details'];
+  tags?: string[] | null;
+}
+
 export class EverMemClient {
   private client: AxiosInstance;
 
@@ -225,13 +237,60 @@ export class EverMemClient {
   }
 
   /**
+   * Create conversation metadata (POST /api/v0/memories/conversation-meta)
+   */
+  async createConversationMeta(request: ConversationMetaCreateRequest) {
+    try {
+      const response = await this.client.request({
+        method: 'POST',
+        url: '/api/v0/memories/conversation-meta',
+        params: request.group_id ? { group_id: request.group_id } : undefined,
+        data: request
+      });
+      return response.data;
+    } catch (error: any) {
+      console.error('Error creating conversation metadata in EverMemOS:', error.response?.data || error.message);
+      throw new Error(`Failed to create conversation metadata: ${error.response?.data?.message || error.message}`);
+    }
+  }
+
+  /**
    * Update conversation metadata (PATCH /api/v0/memories/conversation-meta)
    */
   async updateConversationMeta(request: ConversationMetaPatchRequest) {
+    const payload = Object.fromEntries(
+      Object.entries(request).filter(([, value]) => value !== undefined)
+    ) as ConversationMetaPatchRequest;
+
     try {
-      const response = await this.client.patch('/api/v0/memories/conversation-meta', request);
+      const response = await this.client.request({
+        method: 'PATCH',
+        url: '/api/v0/memories/conversation-meta',
+        params: payload.group_id ? { group_id: payload.group_id } : undefined,
+        data: payload
+      });
       return response.data;
     } catch (error: any) {
+      const status = error.response?.status;
+      const message = String(error.response?.data?.message || error.message || '');
+
+      if (
+        payload.group_id &&
+        (status === 404 || /not found/i.test(message))
+      ) {
+        return this.createConversationMeta({
+          group_id: payload.group_id,
+          scene: 'assistant',
+          created_at: new Date().toISOString(),
+          description: payload.description,
+          scene_desc: payload.scene_desc,
+          llm_custom_setting: payload.llm_custom_setting,
+          default_timezone: payload.default_timezone,
+          user_details: payload.user_details,
+          tags: payload.tags,
+        });
+      }
+
       console.error('Error updating conversation metadata in EverMemOS:', error.response?.data || error.message);
       throw new Error(`Failed to update conversation metadata: ${error.response?.data?.message || error.message}`);
     }
