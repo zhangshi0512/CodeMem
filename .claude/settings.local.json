@@ -11,7 +11,10 @@
       "mcp__claude_ai_EchoChat_Memory__save_conversation",
       "mcp__claude_ai_EchoChat_Memory__search_memories",
       "mcp__codemem__search_project_memory",
-      "mcp__codemem__list_recent_memories"
+      "mcp__codemem__list_recent_memories",
+      "mcp__codemem__add_foresight_todo",
+      "mcp__codemem__search_project_memory_index",
+      "mcp__codemem__get_memory_details"
     ]
   }
 }

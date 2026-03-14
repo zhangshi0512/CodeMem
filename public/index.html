@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CodeMem - Memory Graph Visualization</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-content">
+        <h1>CodeMem Memory Visualization</h1>
+        <div class="header-controls">
+          <button class="btn-icon" id="refresh-btn" title="Refresh">⟳</button>
+          <button class="btn-icon" id="settings-btn" title="Settings">⚙️</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="app-main">
+      <!-- Sidebar: Controls & Filters -->
+      <aside class="sidebar">
+        <div class="sidebar-section">
+          <h3>Views</h3>
+          <button class="view-btn active" data-view="graph">Memory Graph</button>
+          <button class="view-btn" data-view="timeline">Timeline</button>
+          <button class="view-btn" data-view="dependencies">Dependencies</button>
+          <button class="view-btn" data-view="search">Search</button>
+        </div>
+
+        <div class="sidebar-section">
+          <h3>Filters</h3>
+          <div class="filter-group">
+            <label>Memory Type</label>
+            <div class="checkbox-group">
+              <input type="checkbox" id="filter-decision" value="decision" checked>
+              <label for="filter-decision">⚖️ Decision</label>
+              <input type="checkbox" id="filter-feature" value="feature" checked>
+              <label for="filter-feature">🟣 Feature</label>
+              <input type="checkbox" id="filter-bugfix" value="bugfix" checked>
+              <label for="filter-bugfix">🔴 Bugfix</label>
+              <input type="checkbox" id="filter-todo" value="todo" checked>
+              <label for="filter-todo">📋 TODO</label>
+            </div>
+          </div>
+
+          <div class="filter-group">
+            <label>Scope</label>
+            <select id="scope-filter">
+              <option value="all">All Projects</option>
+              <option value="repo" selected>Current Repo</option>
+              <option value="session">This Session</option>
+            </select>
+          </div>
+
+          <div class="filter-group">
+            <label>Component Layer</label>
+            <select id="layer-filter">
+              <option value="">All Layers</option>
+              <option value="api">API</option>
+              <option value="database">Database</option>
+              <option value="frontend">Frontend</option>
+              <option value="auth">Auth</option>
+              <option value="infrastructure">Infrastructure</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <h3>Legend</h3>
+          <div class="legend-item">
+            <span class="node-type decision">⚖️</span> Decision
+          </div>
+          <div class="legend-item">
+            <span class="node-type feature">🟣</span> Feature
+          </div>
+          <div class="legend-item">
+            <span class="node-type bugfix">🔴</span> Bugfix
+          </div>
+          <div class="legend-item">
+            <span class="node-type todo">📋</span> Todo
+          </div>
+          <div class="legend-item">
+            <span class="edge-line"></span> Dependency
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main Content Area -->
+      <main class="main-content">
+        <!-- Search Bar -->
+        <div class="search-bar">
+          <input
+            type="text"
+            id="search-input"
+            placeholder="Search memories by title, description, or tags..."
+            class="search-input"
+          >
+          <button class="btn-primary" id="search-btn">Search</button>
+        </div>
+
+        <!-- View Container -->
+        <div class="view-container">
+          <!-- Graph View -->
+          <div id="graph-view" class="view-content active">
+            <div class="canvas-container">
+              <canvas id="memory-canvas"></canvas>
+              <div class="canvas-info">
+                <span id="node-count">Loading memories...</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Timeline View -->
+          <div id="timeline-view" class="view-content">
+            <div class="timeline-container">
+              <div id="timeline-content" class="timeline-items"></div>
+            </div>
+          </div>
+
+          <!-- Dependencies View -->
+          <div id="dependencies-view" class="view-content">
+            <div class="dependencies-container">
+              <div class="file-tree">
+                <h4>Affected Files Dependency Map</h4>
+                <div id="file-tree-content" class="tree-items"></div>
+              </div>
+              <div class="file-details">
+                <h4>File Details</h4>
+                <div id="file-details-content" class="details-panel"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Search Results View -->
+          <div id="search-view" class="view-content">
+            <div class="search-results">
+              <div id="search-results-content" class="results-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Detail Panel -->
+        <div id="detail-panel" class="detail-panel hidden">
+          <div class="detail-header">
+            <h3 id="detail-title"></h3>
+            <button class="btn-close" id="close-detail">✕</button>
+          </div>
+          <div class="detail-content">
+            <div id="detail-body"></div>
+            <div id="detail-meta" class="meta-info"></div>
+            <div id="detail-relations" class="relations-info"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Loading Indicator -->
+  <div id="loading-indicator" class="loading hidden">
+    <div class="spinner"></div>
+    <span>Loading memories...</span>
+  </div>
+
+  <script src="/js/api.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>
